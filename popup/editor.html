@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New Script | ALLEN Toolbox</title>
+  <link rel="icon" href="../icons/icon48.png">
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="../lib/codemirror.css">
+  <link rel="stylesheet" href="editor.css">
+</head>
+<body>
+  <header class="editor-header">
+    <img class="editor-logo" src="../icons/logo.svg" alt="ALLEN Toolbox" width="28" height="28">
+    <nav class="tabs" role="tablist" aria-label="Script editor">
+      <button role="tab" data-view="code" aria-controls="view-code" aria-selected="true">Code</button>
+      <button role="tab" data-view="settings" aria-controls="view-settings" aria-selected="false">Settings</button>
+      <button role="tab" data-view="scripts" aria-controls="view-scripts" aria-selected="false">Scripts</button>
+      <button role="tab" data-view="help" aria-controls="view-help" aria-selected="false" aria-label="Help" title="Help (F1)">Help</button>
+    </nav>
+    <strong id="script-title">New script</strong>
+    <div class="header-actions">
+      <button id="copy" title="Copy the complete userscript">Copy</button>
+      <button id="paste" data-edit title="Replace code from the clipboard; undo with Ctrl+Z">Paste</button>
+      <button id="save" class="primary" disabled title="Ctrl+S">Save</button>
+      <button id="save-close" disabled title="Ctrl+Shift+S">Save &amp; Close</button>
+      <button id="close" title="Close this editor">Close</button>
+    </div>
+  </header>
+
+  <aside id="us-banner" class="notice warning" hidden>
+    <span>Scripts can be saved, but Chrome needs <b>Allow User Scripts</b> enabled before they run.</span>
+    <button id="extension-settings">Open Extension Settings</button>
+    <button id="recheck">Check Again</button>
+  </aside>
+  <aside id="source-notice" class="notice" hidden>No website context is available. Replace example.org in @match with the website where this script should run.</aside>
+  <aside id="draft-note" class="notice warning" hidden>
+    <span id="draft-message"></span>
+    <button id="restore-draft">Restore Draft</button>
+    <button id="discard-draft">Discard Draft</button>
+  </aside>
+  <div id="error-alert" class="notice error" role="alert" hidden></div>
+
+  <main>
+    <section id="view-code" class="view code-view" role="tabpanel">
+      <div class="editor-tools">
+        <button id="new-script" data-edit>New</button>
+        <button id="import-toggle" data-edit>Import</button>
+        <button id="export">Export .user.js</button>
+        <button id="export-bundle" title="Export the whole extension with saved scripts, without browser-saved values">Export Extension ZIP</button>
+        <span class="separator"></span>
+        <button id="find">Find</button>
+        <button id="replace" data-edit>Replace</button>
+        <button id="check">Check Syntax</button>
+        <span id="source-label" class="source-label"></span>
+        <button id="reload-source" title="Reload the originating website to run saved scripts">Reload Website</button>
+      </div>
+      <div id="import-panel" class="import-panel" hidden>
+        <input id="script-file" type="file" accept=".js,.user.js,.txt" hidden>
+        <button id="upload" data-edit>Upload File</button>
+        <label class="url-field"><span>Userscript URL</span><input id="import-url" type="url" placeholder="https://.../script.user.js" data-edit></label>
+        <button id="fetch-script" data-edit>Get Script</button>
+      </div>
+      <p id="no-header" class="notice" hidden>No userscript header found. Set a name and @match in Settings; a header will be added when saving.</p>
+      <div class="editor-host"><textarea id="code" spellcheck="false" aria-label="Userscript JavaScript"></textarea></div>
+    </section>
+
+    <section id="view-settings" class="view scroll-view" role="tabpanel" hidden>
+      <div class="settings-grid">
+        <div>
+          <h2>Script Settings</h2>
+          <label class="check"><input id="enabled" type="checkbox" checked data-edit> Enabled</label>
+          <p class="muted">Saving updates the script for the next page load. Existing scripts and their saved values are retained.</p>
+          <h3>Metadata</h3>
+          <label>Name <input id="meta-name" data-meta="name" data-edit></label>
+          <label>Namespace <input data-meta="namespace" data-edit></label>
+          <label>Version <input data-meta="version" data-edit></label>
+          <label>Description <input data-meta="description" data-edit></label>
+          <label>Author <input data-meta="author" data-edit></label>
+          <label>Run At <select data-meta="run-at" data-edit><option>document-start</option><option>document-body</option><option>document-end</option><option>document-idle</option></select></label>
+          <label>Injection <select data-meta="inject-into" data-edit><option value="auto">Automatic (page)</option><option value="page">Page (fetch / XHR hooks)</option><option value="content">Isolated content world</option></select></label>
+          <label class="check"><input data-meta="noframes" type="checkbox" data-edit> Only run in the top frame (@noframes)</label>
+        </div>
+        <div>
+          <h2>Where It Runs</h2>
+          <p class="muted">These fields edit the actual // @metadata header. Use one entry per line.</p>
+          <label>@match <textarea id="meta-match" data-meta="match" rows="3" spellcheck="false" data-edit></textarea></label>
+          <div class="inline-actions"><button id="match-site" data-edit>Use This Website</button><button id="match-page" data-edit>Use This Page</button></div>
+          <label>@include <textarea data-meta="include" rows="2" spellcheck="false" data-edit></textarea></label>
+          <label>@exclude <textarea data-meta="exclude" rows="2" spellcheck="false" data-edit></textarea></label>
+          <label>@exclude-match <textarea data-meta="exclude-match" rows="2" spellcheck="false" data-edit></textarea></label>
+          <h3>Script Permissions</h3>
+          <label>@grant <textarea data-meta="grant" rows="3" spellcheck="false" data-edit></textarea></label>
+          <label>@connect <textarea data-meta="connect" rows="2" spellcheck="false" data-edit></textarea></label>
+          <p id="permissions-summary" class="muted"></p>
+          <p class="muted">Only install scripts you trust. Site access and @connect are separate permissions; Chrome will ask for missing site access when saving.</p>
+        </div>
+        <div>
+          <h2>Editor Preferences</h2>
+          <label class="check"><input id="wrap" type="checkbox" data-pref> Wrap long lines</label>
+          <label>Font Size <input id="font-size" type="number" min="10" max="26" value="14" data-pref></label>
+          <label>Indentation <select id="indent" data-pref><option value="2">2 spaces</option><option value="4">4 spaces</option><option value="tab">Tabs</option></select></label>
+          <p class="muted">Preferences are saved locally and used by every editor tab.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-scripts" class="view scroll-view" role="tabpanel" hidden>
+      <div class="section-heading"><h2>Your Scripts</h2><div class="inline-actions"><button id="scan-bundles">Rescan Folder Scripts</button><button id="manager-new" class="primary" data-edit>+ New Script</button></div></div>
+      <p class="muted">Folder scripts live in <code>scripts/</code> and are listed in <code>scripts/scripts.json</code>. Rescanning restores missing imports and preserves saved edits and enabled states. Folder scripts cannot be deleted here; disable them instead. Extension ZIP export includes saved code and enabled states, not local values or drafts. Review code for embedded secrets before sharing.</p>
+      <div id="script-list"></div>
+      <p id="scripts-empty" class="muted" hidden>No scripts installed. Use New, then write code or import a .user.js file.</p>
+      <h3>Local Drafts</h3>
+      <p class="muted">Unsaved edits are kept on this machine. A draft is not installed or executed.</p>
+      <div id="draft-list"></div>
+    </section>
+
+    <section id="view-help" class="view scroll-view" role="tabpanel" hidden>
+      <div class="help-content">
+        <h2>Userscript Editor</h2>
+        <p>New scripts use the website you opened the toolbox from. Settings can narrow @match to that page. Import accepts files, clipboard text or an HTTPS userscript link. Export downloads the current editor contents as .user.js.</p>
+        <h3>Ship Custom Scripts</h3>
+        <p>Add .user.js files to scripts/ and entries such as {"id":"my-helper","file":"my-helper.user.js","enabled":true} to scripts/scripts.json, then reload the extension. Rescanning restores missing imports while preserving saved edits and enabled states. Folder scripts are protected from deletion in the toolbox; disable them instead. Export Extension ZIP creates a fresh, ready-to-share extension folder with all saved scripts. Recipients still need to enable Allow User Scripts and grant their own site access. Remote @require and @resource dependencies may need network access.</p>
+        <h3>Keyboard Shortcuts</h3>
+        <table><tbody>
+          <tr><td>Ctrl+S / Cmd+S</td><td>Save</td></tr>
+          <tr><td>Ctrl+Shift+S / Cmd+Shift+S</td><td>Save &amp; Close</td></tr>
+          <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Undo / redo</td></tr>
+          <tr><td>Ctrl+F / Cmd+F</td><td>Find</td></tr>
+          <tr><td>Ctrl+H / Cmd+Alt+F</td><td>Replace</td></tr>
+          <tr><td>Ctrl+G / Cmd+G</td><td>Find next</td></tr>
+          <tr><td>Alt+G</td><td>Go to line</td></tr>
+          <tr><td>Ctrl+Space</td><td>JavaScript completion</td></tr>
+          <tr><td>Ctrl+/ / Cmd+/</td><td>Toggle comment</td></tr>
+          <tr><td>Tab / Shift+Tab</td><td>Indent / unindent</td></tr>
+          <tr><td>Alt+F</td><td>Fold / unfold code</td></tr>
+          <tr><td>Ctrl+Enter / Cmd+Enter</td><td>Check syntax without running code</td></tr>
+          <tr><td>F1</td><td>Help</td></tr>
+        </tbody></table>
+        <h3>Supported Script Features</h3>
+        <p>@match, @include, exclusions, @run-at, @noframes, @inject-into, @grant, @connect, @require and @resource use the existing toolbox runtime. GM_* and GM.* values, styles, menus, networking, downloads and AO toolbox helpers remain available. For page fetch/XHR interception, use page injection and document-start, then reload the website.</p>
+        <p>Compatibility is not complete: cloud sync, automatic @updateURL updates, GM_cookie and GM_getTab/GM_saveTab are not implemented. document-body currently runs at document-end. Large downloads should use GM_download or the built-in Media tools rather than the GM_xmlhttpRequest binary reply (60 MB limit).</p>
+        <h3>PDFs</h3>
+        <p>Open a PDF in the ALLEN viewer, then use Media &gt; Open or Save. The toolbox tries the fresh authorized stream first and keeps the old captured-blob method as a fallback. A complete PDF already captured from that viewer can still open and save if the stream request fails. Blob-only PDFs remain supported. If neither method has a complete PDF, reopen the viewer to capture a fresh token.</p>
+        <h3>Credits</h3>
+        <p>Credits to <strong>Supreme</strong> for ALLEN Toolbox.</p>
+        <p class="muted">PDF tools: pdf.js by Mozilla (Apache-2.0). <a href="../lib/pdfjs-LICENSE.txt" target="_blank" rel="noopener">pdf.js license</a></p>
+        <p class="muted">Editor engine: CodeMirror 5 (MIT), also used by Violentmonkey. <a href="https://github.com/violentmonkey/violentmonkey" target="_blank" rel="noopener noreferrer">Violentmonkey source</a> | <a href="../lib/codemirror.LICENSE" target="_blank" rel="noopener">CodeMirror license</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer><div class="footer-copy"><span id="status" role="status" aria-live="polite">Loading editor...</span><span class="footer-credit">Credits to <strong>Supreme</strong></span></div><span id="metadata-line"></span><span id="cursor">Line 1, Col 1</span></footer>
+  <iframe id="syntax" src="../sandbox/check.html" title="JavaScript syntax checker" hidden></iframe>
+  <script src="../lib/codemirror.js"></script>
+  <script type="module" src="editor.js"></script>
+</body>
+</html>

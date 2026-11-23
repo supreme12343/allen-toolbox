@@ -1,0 +1,13 @@
+dist/
+node_modules/
+.kilo/
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crx
+.DS_Store
+Thumbs.db

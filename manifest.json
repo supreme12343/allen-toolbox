@@ -1,0 +1,105 @@
+{
+  "manifest_version": 3,
+  "name": "ALLEN Toolbox",
+  "version": "2.1.1",
+  "homepage_url": "https://github.com/supreme12343/allen-toolbox",
+  "description": "Local study tools: page fixes, PDF/video downloads, utilities and portable userscripts. Credits to Supreme.",
+  "minimum_chrome_version": "120",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "ALLEN Toolbox - Credits to Supreme",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "alarms",
+    "downloads",
+    "offscreen",
+    "scripting",
+    "webRequest",
+    "webNavigation",
+    "declarativeNetRequestWithHostAccess",
+    "userScripts",
+    "notifications",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "*://*.allenoverseas.com/*",
+    "https://api.github.com/*"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.allenoverseas.com/*"
+      ],
+      "js": [
+        "content/main.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*.allenoverseas.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Open ALLEN Toolbox"
+    },
+    "save-pdf": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Save the PDF on this page"
+    },
+    "open-pdf": {
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
+      "description": "Open the PDF on this page in a new tab"
+    },
+    "remove-overlays": {
+      "suggested_key": {
+        "default": "Alt+Shift+O"
+      },
+      "description": "Remove blocking overlays on this page"
+    }
+  },
+  "sandbox": {
+    "pages": [
+      "sandbox/check.html"
+    ]
+  }
+}

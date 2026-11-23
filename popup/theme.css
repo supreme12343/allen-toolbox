@@ -1,0 +1,49 @@
+:root {
+  color-scheme: dark;
+  --bg: #12151b;
+  --panel: #191d24;
+  --card: #1d222b;
+  --line: #363d49;
+  --text: #edf0f5;
+  --mute: #abb5c4;
+  --blue: #90b3e8;
+  --blue-h: #a6c4f0;
+  --primary: #2d66b4;
+  --primary-hover: #346fc0;
+  --primary-pressed: #24538f;
+  --success: #bccbdc;
+  --red: #f3a5a9;
+  --amber: #e7c08a;
+  --accent-ink: #ffffff;
+  --button: #242a34;
+  --button-hover: #2c3440;
+  --button-pressed: #303b48;
+  --input: #15191f;
+  --control-border: #8594a8;
+  --control-border-hover: #a7b6ca;
+  --selection: #24344d;
+  --selection-border: #7192bd;
+  --warning-bg: #2b251b;
+  --warning-border: #8b7048;
+  --error-bg: #302126;
+  --error-border: #976168;
+  --font-ui: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, Consolas, monospace;
+  --radius-control: 4px;
+  --radius-card: 6px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --feedback-duration: 120ms;
+  --state-duration: 180ms;
+  --motion-panel: 180ms;
+  --motion-card: 240ms;
+  --motion-nav: 220ms;
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+}
+
+.footer-copy { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.footer-credit { color: var(--mute); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.footer-credit strong { color: var(--text); font-weight: 600; }

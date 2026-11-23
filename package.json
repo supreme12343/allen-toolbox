@@ -1,0 +1,12 @@
+{
+  "name": "allen-toolbox",
+  "version": "2.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node tools/check.mjs",
+    "test": "node --test",
+    "release": "node tools/release.mjs",
+    "icons": "node tools/build-icons.mjs"
+  }
+}

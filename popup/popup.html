@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ALLEN Toolbox</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/logo.svg" alt="" class="logo" width="32" height="32">
+    <div class="head-text">
+      <b>ALLEN Toolbox</b>
+      <span id="site" title="">Loading...</span>
+    </div>
+    <span id="count" class="pill" role="status" aria-live="polite" aria-atomic="true" hidden></span>
+    <button id="dashboard" class="icon-btn" aria-label="Open toolbox in a full tab" title="Open in a full tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M10 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></svg>
+    </button>
+  </header>
+
+  <nav id="tabs" role="tablist" aria-label="Toolbox sections">
+    <button id="nav-media" role="tab" aria-controls="tab-media" aria-selected="true" tabindex="0" data-tab="media" class="active">Library</button>
+    <button id="nav-features" role="tab" aria-controls="tab-features" aria-selected="false" tabindex="-1" data-tab="features">Page fixes</button>
+    <button id="nav-plugins" role="tab" aria-controls="tab-plugins" aria-selected="false" tabindex="-1" data-tab="plugins">Scripts</button>
+    <button id="nav-tools" role="tab" aria-controls="tab-tools" aria-selected="false" tabindex="-1" data-tab="tools">Utilities</button>
+  </nav>
+
+  <main>
+    <section id="tab-media" class="panel active" role="tabpanel" aria-labelledby="nav-media">
+      <div class="panel-heading"><div><h1>Detected files</h1></div><button id="media-rescan" class="btn compact">Rescan</button></div>
+      <label class="search"><span class="field-label">Find a file</span><input id="media-search" type="search" placeholder="Search title or file name" autocomplete="off"></label>
+      <div class="filter-bar" role="group" aria-label="Filter detected files">
+        <button data-media-filter="all" aria-pressed="true" class="active">All files</button>
+        <button data-media-filter="pdf" aria-pressed="false">PDFs</button>
+        <button data-media-filter="video" aria-pressed="false">Video</button>
+        <button data-media-filter="audio" aria-pressed="false">Audio</button>
+        <span id="media-summary" class="tiny"></span>
+      </div>
+      <div id="media-list"></div>
+      <div id="media-empty" class="empty" hidden>
+        <div class="empty-ico"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M14 5h14l9 9v29H14zM28 5v10h9M20 23h11M20 29h11M20 35h7"/></svg></div>
+        <b>Nothing detected yet</b>
+        <p id="media-empty-text">Open a PDF or play a recording for a few seconds, then press Rescan. Downloads continue even after this panel closes.</p>
+      </div>
+      <p class="privacy-line">Local tools. No analytics. DRM-protected and live streams are not supported.</p>
+    </section>
+
+    <section id="tab-features" class="panel" role="tabpanel" aria-labelledby="nav-features" hidden>
+      <div class="panel-heading"><div><h1>Page fixes</h1><p>Browser controls and per-site preferences.</p></div></div>
+      <button id="site-toggle" class="row site-toggle" role="switch" aria-checked="true" aria-label="Page fixes on this site" aria-describedby="site-fixes-status"><span class="tx"><span class="nm">Page fixes on this site</span><span id="site-fixes-status" class="ds">Checking this page...</span></span><span class="sw" aria-hidden="true"><i></i></span></button>
+      <div class="presets" role="group" aria-label="Page fix presets"><button class="btn" data-preset="balanced">Balanced</button><button class="btn" data-preset="full">All fixes</button><button class="btn" data-preset="off">Turn off</button></div>
+      <label class="search"><span class="field-label">Find a page fix</span><input id="feature-search" type="search" placeholder="Search controls and permissions" autocomplete="off"></label>
+      <p class="tiny">Switches are saved globally. The site switch pauses fixes only here. Reload to fully restore page-start hooks.</p>
+      <div id="feature-list"></div>
+    </section>
+
+    <section id="tab-plugins" class="panel" role="tabpanel" aria-labelledby="nav-plugins" hidden>
+      <div class="panel-heading"><div><h1>Userscripts</h1><p>Manage installed scripts and shared bundles.</p></div></div>
+      <div id="us-banner" class="note warn" hidden>
+        <b>Userscript access is disabled</b>
+        <p>Chrome only runs add-on scripts after you allow it once: open the extension settings, turn on <b>Allow User Scripts</b>, then come back and press <i>Check again</i>.</p>
+        <div class="grid"><button id="us-open-settings" class="btn primary">Open extension settings</button><button id="us-recheck" class="btn">Check again</button></div>
+      </div>
+
+      <div id="menu-wrap" hidden><div class="group-title">Commands on this page</div><div id="menu-list"></div></div>
+
+      <div class="group-title">Your scripts</div>
+      <div id="us-list"></div>
+      <div id="us-empty" class="empty small" hidden><b>No scripts installed</b><p>Import a .user.js file or create one in the editor.</p></div>
+      <div class="grid">
+        <button id="us-add" class="btn primary wide">+ New script</button>
+        <button id="us-manager" class="btn wide">Manage in tab</button>
+      </div>
+      <p class="tiny">Write, paste or import scripts in the full-tab editor. New scripts target this website automatically.</p>
+
+      <div class="note bundle-note">
+        <b>Export and folder scripts</b>
+        <p>Put <code>.user.js</code> files in <code>scripts/</code> and list them in <code>scripts/scripts.json</code>. Or export a ready-to-share extension ZIP containing your installed scripts.</p>
+        <div class="grid"><button id="bundle-export" class="btn primary" title="Open the full-tab editor to export safely">Open ZIP exporter</button><button id="bundle-reload" class="btn">Rescan folder scripts</button></div>
+        <p id="bundle-status" class="tiny">Folder scripts are protected; rescanning restores missing imports and preserves edits. ZIPs exclude local values; review code for embedded secrets.</p>
+      </div>
+
+      <div id="folder-wrap" hidden><div class="group-title">Folder plugins</div><div id="plugin-list"></div></div>
+
+      <button id="reload-ext" class="btn wide">Reload extension</button>
+      <details class="note ai-note" id="ai-assist">
+        <summary>AI script assistance</summary>
+        <div>
+          <p>Use the template with your preferred AI, then review and save the resulting code in the editor.</p>
+          <div class="grid">
+            <button id="copy-prompt" class="btn">Copy AI prompt</button>
+            <button id="save-prompt" class="btn">Download .md</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section id="tab-tools" class="panel" role="tabpanel" aria-labelledby="nav-tools" hidden>
+      <div class="panel-heading"><div><h1>Utilities</h1><p>Reading, capture, playback and access controls.</p></div></div>
+      <div class="group-title">Read &amp; capture</div>
+      <div class="grid utility-grid">
+        <button class="btn" data-tool="reading">Focus reading view</button>
+        <button class="btn" id="tool-screenshot">Save visible screenshot</button>
+        <button class="btn" id="tool-clean-link">Copy clean page link</button>
+        <button class="btn" id="tool-save-text">Save page as text</button>
+        <button class="btn" id="tool-links">Copy page links</button>
+        <button class="btn" id="tool-text">Copy page text</button>
+      </div>
+      <div class="group-title">Page controls</div>
+      <div class="grid utility-grid">
+        <button class="btn" data-tool="overlays">Remove overlays</button>
+        <button class="btn" data-tool="restore-overlays">Undo overlay removal</button>
+        <button class="btn" data-tool="print">Print page</button>
+        <button class="btn" data-tool="fullscreen">Fullscreen</button>
+        <button class="btn" id="tool-reload">Reload page</button>
+        <button class="btn" id="tool-clear">Clear detected list</button>
+      </div>
+      <label class="row-inline"><span>Playback speed<small>Applies to videos and audio on this page.</small></span><select id="playback-speed" aria-label="Playback speed"><option value="0.75">0.75x</option><option value="1" selected>1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label>
+
+      <div class="group-title">Downloads</div>
+      <label class="row-inline">
+        <span>Parallel segments<small>More is faster. 8 is a safe default.</small></span>
+        <select id="concurrency"><option>2</option><option>4</option><option>6</option><option>8</option><option>12</option><option>16</option></select>
+      </label>
+      <p class="tiny">Failed requests retry automatically. Lower parallelism if a server rate-limits you. Keep the browser open until saving finishes.</p>
+      <button id="open-downloads" class="btn">Open browser downloads</button>
+
+      <div class="group-title">GitHub updates</div>
+      <div id="updates-panel" class="note flat" aria-busy="false">
+        <label class="file-field" for="update-repository"><span class="field-label">Public GitHub repository</span><input id="update-repository" class="name-input" type="url" placeholder="https://github.com/OWNER/REPO" autocomplete="off" spellcheck="false" aria-describedby="update-help update-status"></label>
+        <div class="grid"><button id="update-save" class="btn">Save repository</button><button id="update-github" class="btn" disabled>Open GitHub</button></div>
+        <button id="update-auto" class="row update-toggle" role="switch" aria-label="Automatic update checks" aria-describedby="update-auto-help" aria-checked="false" disabled><span class="tx"><span class="nm">Automatic update checks</span><span id="update-auto-help" class="ds">Check GitHub every hour and notify when a newer version is published.</span></span><span class="sw" aria-hidden="true"><i></i></span></button>
+        <div class="grid"><button id="update-check" class="btn primary" disabled>Check for updates</button><button id="update-release" class="btn" hidden>View release</button></div>
+        <button id="update-download" class="btn primary wide" hidden>Download update ZIP</button>
+        <p id="update-status" class="status" role="status" aria-live="polite" aria-atomic="true">Loading update settings...</p>
+        <p id="update-help">GitHub ZIPs cannot silently update a Load unpacked installation. Replace files in the original extension folder, then reload it at chrome://extensions. Fully automatic extension installs require Chrome Web Store distribution. Saved userscript edits are preserved, not overwritten.</p>
+      </div>
+
+      <div class="group-title">Access</div>
+      <div class="note flat">
+        <p id="perm-text">Videos are often served from a different domain than the site. Allow access once and the extension can detect and fetch them anywhere.</p>
+        <button id="perm-site" class="btn">Allow this site</button>
+        <button id="perm-all" class="btn primary">Allow all sites</button>
+        <button id="perm-revoke" class="btn" hidden>Remove optional access</button>
+      </div>
+
+      <div class="group-title">Shortcuts</div>
+      <div class="note flat">
+        <p><kbd>Alt</kbd>+<kbd>O</kbd> remove overlays (on the page)<br>
+           <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save PDF / <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> open PDF<br>
+           <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> open this panel</p>
+        <button id="shortcuts" class="btn">Customise shortcuts</button>
+      </div>
+    </section>
+  </main>
+
+  <footer><div class="footer-copy"><span id="status" role="status" aria-live="polite">Ready</span><span class="footer-credit">Credits to <strong>Supreme</strong></span></div><button id="reset" class="link">Reset settings</button></footer>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

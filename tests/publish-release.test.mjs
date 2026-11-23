@@ -1,0 +1,97 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { publishRelease } from '../tools/publish-release.mjs';
+
+const repository = 'https://github.com/example/allen-toolbox', commit = 'a'.repeat(40);
+const hash = (data) => createHash('sha256').update(data).digest('hex');
+const archive = Buffer.from('ZIP fixture'), filename = 'ALLEN-Toolbox-2.1.1.zip', checksum = hash(archive);
+const release = { repository, version: '2.1.1', tag: 'v2.1.1', filename, checksum, blob: new Blob([archive]) };
+const checksumText = checksum + '  ' + filename + '\n';
+const expected = [{ name: filename, size: archive.length, digest: 'sha256:' + checksum, state: 'uploaded' },
+  { name: filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText), state: 'uploaded' }];
+const draft = (assets = []) => ({ tag_name: release.tag, draft: true, prerelease: false, assets: structuredClone(assets) });
+
+function fixture(options = {}) {
+  const calls = [], env = { tag: options.tag || '', state: options.state ? structuredClone(options.state) : null };
+  let localTag = '', failed = false;
+  env.run = async (command, args) => {
+    calls.push({ command, args });
+    if (command === 'git') {
+      if (args[0] === 'ls-remote') {
+        if (options.failRefs) throw Object.assign(new Error('Cannot reach origin'), { code: 128 });
+        if (!env.tag) throw Object.assign(new Error('No tag'), { code: 2 });
+        return env.tag + '\trefs/tags/' + release.tag + '\n';
+      }
+      if (args[0] === 'tag') localTag = args[2];
+      if (args[0] === 'push') env.tag = localTag;
+      return '';
+    }
+    if (args[0] === 'api') {
+      if (!env.state) throw Object.assign(new Error('No release'), { stderr: 'gh: Not Found (HTTP 404)' });
+      return JSON.stringify(env.state);
+    }
+    const operation = args[1];
+    if (operation === 'create') {
+      if (options.failCreate && !failed) { failed = true; throw new Error('API temporarily unavailable'); }
+      assert.ok(args.includes('--draft')); env.state = draft();
+    }
+    if (operation === 'upload') {
+      assert.equal(env.state.draft, true, 'Uploads must remain private');
+      const name = args[3].slice('dist/'.length);
+      if (options.failUpload === name && !failed) { failed = true; throw new Error('Upload interrupted'); }
+      env.state.assets.push(structuredClone(expected.find((asset) => asset.name === name)));
+    }
+    if (operation === 'edit') {
+      assert.deepEqual(env.state.assets, expected, 'Do not publish an incomplete release');
+      assert.ok(args.includes('--draft=false')); env.state.draft = false;
+    }
+    return '';
+  };
+  env.publish = () => publishRelease({ repository, commit, release, run: env.run });
+  env.calls = calls;
+  return env;
+}
+
+test('publication creates an immutable tag, uploads privately and publishes only complete verified artifacts', async () => {
+  const env = fixture(), result = await env.publish();
+  assert.equal(result.published, true); assert.equal(env.tag, commit); assert.equal(env.state.draft, false);
+  assert.deepEqual(env.state.assets, expected);
+  assert.equal(env.calls.filter((call) => call.command === 'git' && call.args[0] === 'push').length, 1);
+  assert.ok(!env.calls.some((call) => call.args.includes('--force') || call.args.includes('--clobber')));
+});
+
+test('a tag push followed by failed draft creation can resume the same commit without changing the tag', async () => {
+  const env = fixture({ failCreate: true });
+  await assert.rejects(env.publish(), /temporarily unavailable/); assert.equal(env.tag, commit); assert.equal(env.state, null);
+  await env.publish(); assert.equal(env.state.draft, false);
+  assert.equal(env.calls.filter((call) => call.command === 'git' && call.args[0] === 'push').length, 1);
+});
+
+test('an interrupted checksum upload stays a draft and reruns upload only the missing file', async () => {
+  const env = fixture({ failUpload: filename + '.sha256' });
+  await assert.rejects(env.publish(), /Upload interrupted/); assert.equal(env.state.draft, true); assert.deepEqual(env.state.assets, [expected[0]]);
+  await env.publish(); assert.equal(env.state.draft, false); assert.deepEqual(env.state.assets, expected);
+  assert.equal(env.calls.filter((call) => call.args[1] === 'upload' && call.args[3] === 'dist/' + filename).length, 1);
+});
+
+test('already published releases are never modified even when the new main commit differs', async () => {
+  const env = fixture({ tag: 'b'.repeat(40), state: { ...draft(expected), draft: false } });
+  assert.equal((await env.publish()).skipped, true);
+  assert.ok(env.calls.every((call) => call.command === 'gh' && call.args[0] === 'api'));
+});
+
+test('incomplete public releases, changed tags and foreign draft assets fail closed without replacing artifacts', async (t) => {
+  const cases = [
+    ['incomplete public release', { tag: commit, state: { ...draft([expected[0]]), draft: false } }, /published release is incomplete/],
+    ['different tag commit', { tag: 'b'.repeat(40) }, /different commit/],
+    ['different draft hash', { tag: commit, state: draft([{ ...expected[0], digest: 'sha256:' + 'f'.repeat(64) }]) }, /differs from the tested artifact/],
+    ['unexpected draft upload', { tag: commit, state: draft([{ name: 'private.txt', state: 'uploaded', size: 12 }]) }, /unexpected assets/],
+    ['failed remote query', { failRefs: true }, /Cannot reach origin/],
+  ];
+  for (const [name, options, message] of cases) await t.test(name, async () => {
+    const env = fixture(options); await assert.rejects(env.publish(), message);
+    assert.ok(!env.calls.some((call) => call.args[1] === 'upload' || call.args[1] === 'edit'));
+    assert.ok(!env.calls.some((call) => call.command === 'git' && call.args[0] === 'push'));
+  });
+});

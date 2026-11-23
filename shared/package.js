@@ -85,7 +85,8 @@ export async function buildExtensionBundle(snapshot, fetchAsset, manifest) {
     }
   }
   await Promise.all([...extra].map(get));
-  const entries = [...assets].map(([path, data]) => ({ path: 'allen-toolbox/' + path, data }));
+  // Concurrent reads may finish in any order; archive order must follow the inventory.
+  const entries = [...EXTENSION_ASSETS, ...extra].map((path) => ({ path: 'allen-toolbox/' + path, data: assets.get(path) }));
   entries.push({ path: 'allen-toolbox/scripts/scripts.json', data: JSON.stringify(index, null, 2) + '\n' });
   for (const { path, text } of files.values()) entries.push({ path: 'allen-toolbox/' + path, data: text });
   return createZip(entries);

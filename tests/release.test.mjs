@@ -49,6 +49,32 @@ test('local releases do not invent a GitHub repository and repeated builds are d
   const files = await archiveFiles(first.blob); assert.equal(JSON.parse(decode(files.get('allen-toolbox/manifest.json'))).homepage_url, undefined);
 });
 
+test('release hashes are independent of concurrent asset completion order', async () => {
+  const build = async (reverse) => {
+    const env = fixture(), pending = new Map();
+    const result = buildRelease({ readAsset: async (path) => {
+      const data = await env.readAsset(path);
+      if (!EXTENSION_ASSETS.includes(path) || path === 'manifest.json') return data;
+      return new Promise((resolve) => pending.set(path, () => resolve(data)));
+    } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pending.size, EXTENSION_ASSETS.length - 1);
+    const releases = [...pending.values()];
+    if (reverse) releases.reverse();
+    for (const finish of releases) finish();
+    return result;
+  };
+  const first = await build(false), second = await build(true);
+  assert.equal(first.checksum, second.checksum);
+  assert.deepEqual([...await archiveFiles(first.blob)].map(([path]) => path), [...await archiveFiles(second.blob)].map(([path]) => path));
+});
+
+test('real source assets rebuild to the same release bytes and checksum', async () => {
+  const first = await buildRelease(), second = await buildRelease();
+  assert.equal(first.checksum, second.checksum);
+  assert.deepEqual(new Uint8Array(await first.blob.arrayBuffer()), new Uint8Array(await second.blob.arrayBuffer()));
+});
+
 test('local builds inherit the configured source repository without claiming the ZIP is unlinked', async () => {
   const env = fixture(), repository = 'https://github.com/example/allen-toolbox';
   env.data.set('manifest.json', JSON.stringify({ ...JSON.parse(env.data.get('manifest.json')), homepage_url: repository }));

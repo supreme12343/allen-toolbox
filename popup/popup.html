@@ -130,8 +130,9 @@
 
       <div class="group-title">GitHub updates</div>
       <div id="updates-panel" class="note flat" aria-busy="false">
-        <label class="file-field" for="update-repository"><span class="field-label">Public GitHub repository</span><input id="update-repository" class="name-input" type="url" placeholder="https://github.com/OWNER/REPO" autocomplete="off" spellcheck="false" aria-describedby="update-help update-status"></label>
-        <div class="grid"><button id="update-save" class="btn">Save repository</button><button id="update-github" class="btn" disabled>Open GitHub</button></div>
+        <span class="field-label">Official update source (fixed)</span>
+        <a id="update-source" class="update-source" href="https://github.com/supreme12343/allen-toolbox" target="_blank" rel="noopener noreferrer">https://github.com/supreme12343/allen-toolbox</a>
+        <button id="update-github" class="btn wide">Open GitHub</button>
         <button id="update-auto" class="row update-toggle" role="switch" aria-label="Automatic update checks" aria-describedby="update-auto-help" aria-checked="false" disabled><span class="tx"><span class="nm">Automatic update checks</span><span id="update-auto-help" class="ds">Check GitHub every hour and notify when a newer version is published.</span></span><span class="sw" aria-hidden="true"><i></i></span></button>
         <div class="grid"><button id="update-check" class="btn primary" disabled>Check for updates</button><button id="update-release" class="btn" hidden>View release</button></div>
         <button id="update-download" class="btn primary wide" hidden>Download update ZIP</button>

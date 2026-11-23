@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { githubRepository, versionParts, compareVersions, githubRelease, initUpdates, UPDATE_ALARM } from '../shared/updates.js';
+import { githubRepository, versionParts, compareVersions, githubRelease, initUpdates, UPDATE_ALARM, OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
-const repository = 'https://github.com/example/allen-toolbox';
+const repository = OFFICIAL_REPOSITORY;
 const HOUR = 60 * 60 * 1000;
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, async emit(...args) { await Promise.all(this.listeners.map((fn) => fn(...args))); } });
@@ -13,6 +13,7 @@ const jsonResponse = (data = metadata(), headers = {}) => new Response(JSON.stri
 
 async function harness(options = {}) {
   const data = options.data || {}, alarms = new Map(), notifications = [], cleared = [], downloads = [], tabs = [], calls = [], leases = [], released = [];
+  if (!options.data && !options.fresh) data.githubUpdates = { repository, automatic: false };
   let time = 100 * HOUR;
   const browser = {
     runtime: { getManifest: () => ({ version: options.version || '2.1.1', homepage_url: options.homepage }),
@@ -67,7 +68,7 @@ test('release selection rejects foreign URLs and never treats draft/prerelease m
 
 test('configuration enables bounded hourly alarms and opt-out removes them without fetching code', async () => {
   const env = await harness();
-  assert.equal((await env.api.status()).repository, ''); assert.equal(env.calls.length, 0);
+  assert.equal((await env.api.status()).repository, repository); assert.equal(env.calls.length, 0);
   await env.api.configure({ repository, automatic: true });
   assert.deepEqual(env.alarms.get(UPDATE_ALARM), { delayInMinutes: 1, periodInMinutes: 60 });
   assert.equal(env.calls.length, 0);
@@ -82,7 +83,7 @@ test('checks omit credentials, isolate request leases, cache 304s and notify onl
   await env.api.configure({ repository, automatic: true });
   const first = await env.api.check({ force: true });
   assert.equal(first.available, true); assert.equal(first.checking, false); assert.equal(first.error, '');
-  assert.equal(env.calls[0].url, 'https://api.github.com/repos/example/allen-toolbox/releases/latest');
+  assert.equal(env.calls[0].url, 'https://api.github.com/repos/supreme12343/allen-toolbox/releases/latest');
   assert.equal(env.calls[0].credentials, 'omit'); assert.equal(env.calls[0].redirect, 'error'); assert.equal(env.calls[0].referrerPolicy, 'no-referrer');
   assert.deepEqual(env.leases[0].requestHeaders, []); assert.deepEqual(env.released, env.leases.map((lease) => lease.requestId));
   await env.api.check({ force: true });
@@ -149,36 +150,35 @@ test('timeout aborts a stalled check and releases its request lease', async () =
   assert.ok(env.released.includes(env.leases[0].requestId)); assert.equal(result.checking, false);
 });
 
-test('a changed repository cannot receive a stale in-flight release or notification', async () => {
+test('repository redirection and clearing are rejected even while a check is in flight', async () => {
   let resolve;
   const env = await harness({ fetch: () => new Promise((done) => { resolve = done; }) });
   await env.api.configure({ repository, automatic: true });
   const pending = env.api.check({ force: true }); await tick();
-  await env.api.configure({ repository: 'https://github.com/other/toolbox', automatic: true });
+  for (const target of ['https://github.com/other/toolbox', '']) await assert.rejects(env.api.configure({ repository: target, automatic: true }), /source is fixed/);
   resolve(jsonResponse()); await pending;
   const result = await env.api.status();
-  assert.equal(result.repository, 'https://github.com/other/toolbox'); assert.equal(result.latest, null); assert.equal(result.error, '');
-  assert.equal(env.notifications.length, 0); assert.equal(env.data.githubUpdates.repository, result.repository);
+  assert.equal(result.repository, repository); assert.equal(result.latest.url, metadata().html_url); assert.equal(result.error, '');
+  assert.equal(env.notifications.length, 1); assert.equal(env.data.githubUpdates.repository, repository);
 });
 
-test('checks wait for pending settings writes before snapshotting a new repository revision', async () => {
+test('checks wait for pending automatic-check preference writes', async () => {
   let hold = false, releaseWrite, signalWrite;
   const started = new Promise((resolve) => { signalWrite = resolve; });
   const gate = new Promise((resolve) => { releaseWrite = resolve; });
-  const other = 'https://github.com/other/toolbox';
   const env = await harness({ beforeWrite: async (value) => {
-    if (hold && value.githubUpdates.repository === other) { hold = false; signalWrite(); await gate; }
-  }, fetch: (url) => jsonResponse(metadata('2.1.2', url.includes('/other/') ? other : repository)) });
-  await env.api.configure({ repository, automatic: false });
+    if (hold && value.githubUpdates.automatic === false) { hold = false; signalWrite(); await gate; }
+  } });
+  await env.api.configure({ automatic: true });
   hold = true;
-  const saving = env.api.configure({ repository: other, automatic: true }); await started;
+  const saving = env.api.configure({ automatic: false }); await started;
   const checking = env.api.check({ force: true }); await tick();
-  try { assert.equal(env.calls.length, 0, 'No old-repository fetch may begin during the storage write'); }
+  try { assert.equal(env.calls.length, 0, 'A check may not start during a pending settings write'); }
   finally { releaseWrite(); }
   await saving; const result = await checking;
-  assert.equal(env.calls.length, 1); assert.ok(env.calls[0].url.includes('/repos/other/toolbox/'));
-  assert.equal(result.latest.url, metadata('2.1.2', other).html_url);
-  assert.equal(env.data.githubUpdates.repository, other); assert.equal(env.data.githubUpdates.metadata.html_url, result.latest.url);
+  assert.equal(env.calls.length, 1); assert.ok(env.calls[0].url.includes('/repos/supreme12343/allen-toolbox/'));
+  assert.equal(result.latest.url, metadata().html_url); assert.equal(result.automatic, false);
+  assert.equal(env.data.githubUpdates.repository, repository); assert.equal(env.data.githubUpdates.metadata.html_url, result.latest.url);
 });
 
 test('timeout bounds a lease queued behind an unresolved request and cleans late grants', async () => {
@@ -195,29 +195,41 @@ test('timeout bounds a lease queued behind an unresolved request and cleans late
   await tick(); assert.ok(env.released.filter((id) => id === env.leases[0].requestId).length >= 2);
 });
 
-test('repository changes can cancel a queued lease and check another repo without waiting for the old holder', async () => {
-  let grant;
-  const queued = new Promise((resolve) => { grant = resolve; }), other = 'https://github.com/other/toolbox';
-  const env = await harness({ acquire: (value) => value.url.includes('/repos/example/') ? queued : undefined,
-    fetch: () => jsonResponse(metadata('2.1.2', other)) });
+test('turning automatic checks off cancels a queued lease and preserves manual checks', async () => {
+  let grant, acquisitions = 0;
+  const queued = new Promise((resolve) => { grant = resolve; });
+  const env = await harness({ acquire: () => acquisitions++ === 0 ? queued : undefined });
   await env.api.configure({ repository, automatic: true });
   const first = env.api.check({ force: true }); await tick();
-  await env.api.configure({ repository: other, automatic: true }); await first;
+  await env.api.configure({ automatic: false }); await first;
   const result = await env.api.check({ force: true });
-  assert.equal(result.repository, other); assert.equal(result.latest.url, metadata('2.1.2', other).html_url);
+  assert.equal(result.repository, repository); assert.equal(result.latest.url, metadata().html_url);
   assert.equal(env.calls.length, 1); grant(); await tick();
 });
 
-test('packaged repository defaults enable checks and browser startup restores a missing alarm', async () => {
-  const env = await harness({ homepage: repository });
+test('the fixed official default needs no input and ignores alternate manifest homepages', async () => {
+  const env = await harness({ fresh: true, homepage: 'https://github.com/other/toolbox' });
   const result = await env.api.status();
   assert.equal(result.repository, repository); assert.equal(result.automatic, true); assert.equal(env.calls.length, 1);
   env.alarms.clear(); await env.browser.runtime.onStartup.emit();
   assert.equal(env.alarms.get(UPDATE_ALARM).periodInMinutes, 60); assert.equal(env.calls.length, 1);
+  assert.equal(env.calls[0].url, 'https://api.github.com/repos/supreme12343/allen-toolbox/releases/latest');
+});
+
+test('legacy or tampered saved repository settings cannot redirect checks or retain foreign metadata', async () => {
+  const other = 'https://github.com/other/toolbox';
+  const env = await harness({ data: { githubUpdates: { repository: other, automatic: false, metadata: metadata('2.1.2', other),
+    etag: '"foreign"', checkedAt: 99 * HOUR, retryAt: 200 * HOUR } } });
+  const initial = await env.api.status();
+  assert.equal(initial.repository, repository); assert.equal(initial.latest, null); assert.equal(initial.checkedAt, 0);
+  assert.equal(env.data.githubUpdates.repository, repository);
+  const result = await env.api.check({ force: true });
+  assert.equal(result.latest.url, metadata().html_url); assert.equal(env.calls[0].headers['If-None-Match'], undefined);
+  assert.ok(env.calls[0].url.includes('/repos/supreme12343/allen-toolbox/'));
 });
 
 test('failed settings persistence does not replace the working repository', async () => {
   const env = await harness({ failStorage: true });
   await assert.rejects(env.api.configure({ repository, automatic: true }), /Storage unavailable/);
-  assert.equal((await env.api.status()).repository, '');
+  assert.equal((await env.api.status()).repository, repository);
 });

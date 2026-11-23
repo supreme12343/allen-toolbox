@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
+import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const theme = await readFile(new URL('../popup/theme.css', import.meta.url), 'utf8');
 const colors = Object.fromEntries([...theme.matchAll(/--([\w-]+):\s*(#[\da-f]{6})/gi)].map((match) => [match[1], match[2]]));
@@ -40,6 +41,16 @@ test('popup and editor share local theme assets without skill content or remote 
   const packaging = await readFile(new URL('../shared/package.js', import.meta.url), 'utf8');
   assert.ok(packaging.includes("'popup/theme.css'"));
   assert.ok(!packaging.includes('.config/kilo'));
+});
+
+test('the official update source is visible but has no URL entry or save controls', async () => {
+  const html = await readFile(new URL('../popup/popup.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('href="' + OFFICIAL_REPOSITORY + '"'));
+  assert.match(html, /Official update source \(fixed\)/);
+  assert.doesNotMatch(html, /id="update-repository"|id="update-save"|Save repository|github\.com\/OWNER\/REPO/);
+  const js = await readFile(new URL('../popup/popup.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(js, /update-repository|update-save/);
+  assert.match(js, /updates:configure', \{ automatic:/);
 });
 
 test('toolbar popup has intrinsic dimensions while the dashboard can shrink to its viewport', async () => {

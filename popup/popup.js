@@ -2,7 +2,7 @@ import { FEATURES, presetConfig, siteKey } from '../shared/features.js';
 import { sourceUrl } from '../shared/usmeta.js';
 import { safeBase } from '../shared/names.js';
 import { cleanPageLink, matchesMediaFilter } from '../shared/utilities.js';
-import { githubRepository } from '../shared/updates.js';
+import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
@@ -770,18 +770,14 @@ let updateState = null;
 function renderUpdates(next) {
   if (!next) return;
   updateState = next;
-  const input = $('#update-repository');
-  if (!input.dataset.touched && document.activeElement !== input) input.value = next.repository;
   $('#updates-panel').setAttribute('aria-busy', String(next.checking));
   $('#update-auto').setAttribute('aria-checked', String(next.automatic));
-  for (const id of ['update-github', 'update-auto', 'update-check']) $('#' + id).disabled = !next.repository || next.checking || !!$('#' + id).dataset.busy;
+  for (const id of ['update-github', 'update-auto', 'update-check']) $('#' + id).disabled = next.checking || !!$('#' + id).dataset.busy;
   $('#update-release').hidden = !next.available;
   $('#update-download').hidden = !next.available || !next.latest?.downloadUrl;
-  if (input.getAttribute('aria-invalid') === 'true' && !next.checking) return;
   const feedback = $('#update-status');
   feedback.className = 'status' + (next.checking ? '' : next.error ? ' err' : next.available ? ' warn' : '');
-  let message = next.checking ? 'Checking GitHub for updates...' : next.error ? next.error : !next.repository ?
-    'Installed: ' + next.installedVersion + '. Save your repository URL to enable updates.' : next.available ?
+  let message = next.checking ? 'Checking GitHub for updates...' : next.error ? next.error : next.available ?
     'Version ' + next.latest.version + ' is available. Installed: ' + next.installedVersion + '.' : next.latest ?
     'Installed: ' + next.installedVersion + '. No newer release is available.' : 'Installed: ' + next.installedVersion + '. No release has been checked yet.';
   if (next.checkedAt && !next.checking) message += ' Last checked: ' + new Date(next.checkedAt).toLocaleString() + '.';
@@ -789,30 +785,15 @@ function renderUpdates(next) {
 }
 
 function wireUpdates() {
-  const input = $('#update-repository');
-  input.addEventListener('input', () => { input.dataset.touched = '1'; input.removeAttribute('aria-invalid'); });
-  wireAction($('#update-save'), async () => {
-    input.disabled = true;
-    try {
-      const repository = githubRepository(input.value);
-      const result = await bg('updates:configure', { repository, automatic: updateState?.repository ? updateState.automatic : true });
-      delete input.dataset.touched; input.value = result.repository; input.removeAttribute('aria-invalid');
-      renderUpdates(result); status(repository ? 'Update repository saved. Checks can also be run manually.' : 'Update repository cleared.', 'ok');
-    } catch (error) {
-      input.setAttribute('aria-invalid', 'true');
-      const feedback = $('#update-status'); feedback.className = 'status err'; feedback.textContent = error.message;
-      throw error;
-    } finally { input.disabled = false; }
-  });
   wireAction($('#update-auto'), async () => {
-    renderUpdates(await bg('updates:configure', { repository: updateState.repository, automatic: !updateState.automatic }));
+    renderUpdates(await bg('updates:configure', { automatic: !updateState.automatic }));
   });
   wireAction($('#update-check'), async () => {
     $('#updates-panel').setAttribute('aria-busy', 'true'); $('#update-status').textContent = 'Checking GitHub for updates...';
     try { renderUpdates(await bg('updates:check')); }
     finally { $('#updates-panel').setAttribute('aria-busy', 'false'); }
   });
-  wireAction($('#update-github'), () => chrome.tabs.create({ url: githubRepository(updateState.repository) }));
+  wireAction($('#update-github'), () => chrome.tabs.create({ url: OFFICIAL_REPOSITORY }));
   wireAction($('#update-release'), () => chrome.tabs.create({ url: updateState.latest.url }));
   wireAction($('#update-download'), async () => {
     const result = await bg('updates:download');

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { buildRelease } from '../tools/release.mjs';
 import { EXTENSION_ASSETS } from '../shared/package.js';
+import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const decode = (data) => new TextDecoder().decode(data);
 function fixture() {
@@ -29,7 +30,7 @@ async function archiveFiles(blob) {
 }
 
 test('release ZIP embeds the real repository, retains seed identity/state and excludes development/private files', async () => {
-  const env = fixture(), repository = 'https://github.com/example/allen-toolbox';
+  const env = fixture(), repository = OFFICIAL_REPOSITORY;
   env.data.set('.env', 'PRIVATE_SECRET'); env.data.set('tests/extra.test.mjs', 'PRIVATE_TEST');
   const release = await buildRelease({ repository, readAsset: env.readAsset }), files = await archiveFiles(release.blob);
   assert.equal(release.filename, 'ALLEN-Toolbox-2.1.1.zip'); assert.equal(release.tag, 'v2.1.1');
@@ -43,10 +44,10 @@ test('release ZIP embeds the real repository, retains seed identity/state and ex
   assert.equal(release.checksum, createHash('sha256').update(new Uint8Array(await release.blob.arrayBuffer())).digest('hex'));
 });
 
-test('local releases do not invent a GitHub repository and repeated builds are deterministic', async () => {
+test('local releases always use the official repository and repeated builds are deterministic', async () => {
   const env = fixture(), first = await buildRelease({ readAsset: env.readAsset }), second = await buildRelease({ readAsset: env.readAsset });
-  assert.equal(first.repository, ''); assert.equal(first.checksum, second.checksum);
-  const files = await archiveFiles(first.blob); assert.equal(JSON.parse(decode(files.get('allen-toolbox/manifest.json'))).homepage_url, undefined);
+  assert.equal(first.repository, OFFICIAL_REPOSITORY); assert.equal(first.checksum, second.checksum);
+  const files = await archiveFiles(first.blob); assert.equal(JSON.parse(decode(files.get('allen-toolbox/manifest.json'))).homepage_url, OFFICIAL_REPOSITORY);
 });
 
 test('release hashes are independent of concurrent asset completion order', async () => {
@@ -75,12 +76,13 @@ test('real source assets rebuild to the same release bytes and checksum', async 
   assert.deepEqual(new Uint8Array(await first.blob.arrayBuffer()), new Uint8Array(await second.blob.arrayBuffer()));
 });
 
-test('local builds inherit the configured source repository without claiming the ZIP is unlinked', async () => {
-  const env = fixture(), repository = 'https://github.com/example/allen-toolbox';
-  env.data.set('manifest.json', JSON.stringify({ ...JSON.parse(env.data.get('manifest.json')), homepage_url: repository }));
+test('manifest homepages cannot redirect the fixed release update source', async () => {
+  const env = fixture(), repository = OFFICIAL_REPOSITORY;
+  env.data.set('manifest.json', JSON.stringify({ ...JSON.parse(env.data.get('manifest.json')), homepage_url: 'https://github.com/other/toolbox' }));
   const release = await buildRelease({ readAsset: env.readAsset }), files = await archiveFiles(release.blob);
   assert.equal(release.repository, repository);
   assert.equal(JSON.parse(decode(files.get('allen-toolbox/manifest.json'))).homepage_url, repository);
+  await assert.rejects(buildRelease({ repository: 'https://github.com/other/toolbox', readAsset: env.readAsset }), /source is fixed/);
 });
 
 test('release packaging refuses unsynchronized/invalid versions, unsafe sources and incomplete inventories', async () => {

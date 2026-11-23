@@ -1,4 +1,4 @@
-# ALLEN Toolbox 2.1.2
+# ALLEN Toolbox 2.1.3
 
 A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 
@@ -7,7 +7,7 @@ A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 * **Recordings**: direct files and supported HLS VOD, transient-request retries, bounded timeouts, verified ranges and final sizes. Separate HLS audio is downloadable and is clearly distinguished from a combined recording.
 * **Scripts**: a local userscript editor and manager, a real `scripts/` folder, and **Export extension ZIP** to ship saved scripts with the entire runtime extension.
 * **Utilities**: reversible overlay cleanup, focus reading, clean-link and page-link copying, text export, visible screenshots, playback speed, media rescan, and browser downloads access.
-* **GitHub updates**: hourly public-release checks, newer-version notifications, a manual check and release ZIP download. GitHub Actions builds and publishes a new version after a push to `main`.
+* **GitHub updates**: automatic hourly checks of the fixed official repository, newer-version notifications, a manual check and release ZIP download. No URL setup is required or available. GitHub Actions builds and publishes a new version after a push to `main`.
 
 ## Install
 
@@ -24,14 +24,14 @@ Use a current desktop Chrome/Chromium browser, preferably 138+. Chrome only runs
 
 ## GitHub releases and updates
 
-Source and releases: [supreme12343/allen-toolbox](https://github.com/supreme12343/allen-toolbox). The extension defaults to this public repository for update checks. Review userscripts for embedded secrets before every push; release packaging does not sanitize source code.
+Source and releases: [supreme12343/allen-toolbox](https://github.com/supreme12343/allen-toolbox). The extension is hard-locked to this official update source. Users never enter a repository URL and cannot change it through settings or saved configuration. Review userscripts for embedded secrets before every push; release packaging does not sanitize source code.
 
 1. Push the source to the repository's `main` branch, or run its **Build and release** GitHub Actions workflow manually. Actions runs syntax checks and regression tests before publishing `v<version>` with `ALLEN-Toolbox-<version>.zip` and its SHA-256 checksum.
 2. For each subsequent update, increase **both** `manifest.json` and `package.json` to the same newer numeric version, then push to `main`. A published version/tag is not replaced. A push without a version increase does not deliver a new update.
-3. Release packaging automatically embeds the actual GitHub repository as the ZIP's `manifest.homepage_url`. People installing that ZIP get hourly checks for that repository and a notification when a newer release appears. The browser must be running and allow notifications; checks are not instant push delivery.
-4. For an existing local installation with saved update settings, open **Utilities > GitHub updates**, enter `https://github.com/supreme12343/allen-toolbox`, and press **Save repository**. New installations use this repository automatically. Automatic checks can be switched off; **Check for updates**, **View release** and **Download update ZIP** remain available manually.
+3. Release packaging embeds the official repository and the updater independently pins the same source in code. People installing the ZIP get hourly checks automatically and a notification when a newer release appears. The browser must be running and allow notifications; checks are not instant push delivery.
+4. **Utilities > GitHub updates** shows the official source as a link, not an editable field. Automatic checks can be switched off; **Check for updates**, **View release** and **Download update ZIP** remain available manually. Legacy or tampered repository settings are ignored and migrated back to the official source.
 
-A local release can also be built with Node 24+: `npm.cmd run release`. Outputs are in `dist/` and use the repository in `manifest.homepage_url`. For a fork, override it with `npm.cmd run release -- --repository=https://github.com/OWNER/REPO`. A source tree without either setting builds an unlinked ZIP, without inventing a repository. GitHub Actions supplies its own repository automatically.
+A local release can also be built with Node 24+: `npm.cmd run release`. Outputs are in `dist/` and always use `https://github.com/supreme12343/allen-toolbox`. Build or publication attempts targeting another update repository are rejected.
 
 Publication keeps the release in draft until both the ZIP and checksum are uploaded and their hashes verified. If a tag push or upload succeeds but a later step fails, rerun **the same workflow run/commit** to resume missing draft uploads. Existing draft files with a different hash are refused, not overwritten. Published releases are never repaired in place; publish a newer version if an old release is incomplete.
 
@@ -188,6 +188,7 @@ pdf.js © Mozilla (Apache-2.0). The GM API follows the conventions established b
 
 ## Changelog
 
+* **2.1.3**: hard-lock updates to the official repository; remove manual URL entry and source switching; migrate legacy source settings safely; keep automatic checks enabled by default without setup.
 * **2.1.2**: deterministic ZIP ordering regardless of concurrent asset reads; authenticated draft-release discovery and verified resumable publication. The unpublished 2.1.1 tag is preserved rather than moved to different source.
 * **2.1.1**: resume server-capped byte ranges without losing or duplicating bytes; retain strict file identity/length checks and HLS validation; add configurable hourly GitHub release checks, update notifications, release ZIP downloads and tested GitHub Actions packaging. Unpacked installations still require replacing files and reloading; stored userscript edits are not overwritten.
 * **2.1.0**: graphite-and-blue interface, compact native popup, updated vector/toolbar logo and responsive dashboard; accessible searchable page fixes and file filters; per-site pause and presets; reversible overlay cleanup and daily utilities; seed-once custom scripts folder with saved-script extension ZIP export; exact request-scoped header leases; stronger PDF fallback, bounded retries/timeouts/range validation, HLS protection/audio checks, and truthful native download completion; regression and isolated-browser checks.

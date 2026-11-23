@@ -4,7 +4,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { buildExtensionBundle } from '../shared/package.js';
 import { validateZipPath } from '../shared/zip.js';
-import { githubRepository, versionParts } from '../shared/updates.js';
+import { githubRepository, versionParts, OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -21,7 +21,8 @@ export async function buildRelease({ repository = '', readAsset = sourceAsset } 
   const [manifest, pkg, index] = await Promise.all(['manifest.json', 'package.json', 'scripts/scripts.json'].map(async (path) => JSON.parse(await text(path))));
   versionParts(manifest.version);
   if (pkg.version !== manifest.version) throw new Error('manifest.json and package.json must have the same release version');
-  const repo = githubRepository(repository || manifest.homepage_url);
+  const repo = OFFICIAL_REPOSITORY;
+  if (repository && githubRepository(repository) !== repo) throw new Error('The release update source is fixed to the official ALLEN Toolbox repository');
   const packagedManifest = { ...manifest, ...(repo ? { homepage_url: repo } : {}) };
   if (!Array.isArray(index)) throw new Error('scripts/scripts.json must be an array');
   const files = await Promise.all(index.map(async (entry) => {
@@ -38,7 +39,7 @@ export async function buildRelease({ repository = '', readAsset = sourceAsset } 
 async function main() {
   const args = {};
   for (const argument of process.argv.slice(2)) {
-    if (argument === '--help') { console.log('Usage: npm run release -- --repository=https://github.com/OWNER/REPO'); return; }
+    if (argument === '--help') { console.log('Usage: npm run release (official update repository is fixed)'); return; }
     if (!argument.startsWith('--repository=')) throw new Error('Unknown release argument: ' + argument);
     args.repository = argument.slice('--repository='.length);
   }

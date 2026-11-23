@@ -106,7 +106,7 @@ h1 { font-size: 18px; font-weight: 600; line-height: 1.4; letter-spacing: -.015e
 .bundle-note { background: transparent; }
 .update-toggle { margin: 10px 0; }
 #updates-panel .grid { margin-top: 8px; }
-#updates-panel input { min-width: 0; }
+.update-source { display: block; color: var(--blue); overflow-wrap: anywhere; margin-bottom: 8px; }
 #updates-panel .status { margin-bottom: 8px; }
 .tiny { font-size: 12px; color: var(--mute); }
 .wide { width: 100%; margin-top: 8px; }

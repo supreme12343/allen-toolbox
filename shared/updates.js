@@ -1,6 +1,7 @@
 import { readBody } from './download.js';
 
 export const UPDATE_ALARM = 'allen-toolbox-github-updates';
+export const OFFICIAL_REPOSITORY = 'https://github.com/supreme12343/allen-toolbox';
 const NOTICE = 'allen-toolbox-update';
 const STORAGE = 'githubUpdates';
 const HOUR = 60 * 60 * 1000;
@@ -49,21 +50,20 @@ export function githubRelease(data, repository) {
 export function initUpdates({ chrome: browser = globalThis.chrome, fetch: request = globalThis.fetch,
   now = Date.now, timeout = 20000, acquireRequest, releaseRequest } = {}) {
   const installedVersion = browser.runtime.getManifest().version;
-  let defaultRepository = '';
-  try { defaultRepository = githubRepository(browser.runtime.getManifest().homepage_url); } catch (error) {}
-  let record = { repository: defaultRepository, automatic: !!defaultRepository, checkedAt: 0, retryAt: 0, metadata: null, etag: '', error: '', notified: '' };
+  let record = { repository: OFFICIAL_REPOSITORY, automatic: true, checkedAt: 0, retryAt: 0, metadata: null, etag: '', error: '', notified: '' };
   let revision = 0, flight = null, active = null, sequence = 0, writes = Promise.resolve();
   const commit = (run) => { const next = writes.then(run); writes = next.catch(() => {}); return next; };
   const store = async (next) => { await browser.storage.local.set({ [STORAGE]: next }); record = next; };
-  const ready = browser.storage.local.get(STORAGE).then((saved) => {
+  const ready = browser.storage.local.get(STORAGE).then(async (saved) => {
     const value = saved[STORAGE];
     if (!value || typeof value !== 'object') return;
-    try {
-      const repository = githubRepository(value.repository);
-      record = { ...record, ...value, repository, automatic: !!repository && value.automatic === true };
-      if (record.metadata) githubRelease(record.metadata, repository);
-    } catch (error) { record.metadata = null; record.etag = ''; record.error = 'Saved update settings are invalid. Save the repository again.'; }
-  }).catch(() => { record.error = 'Update settings could not be read.'; });
+    const sameSource = value.repository === OFFICIAL_REPOSITORY;
+    record = { ...record, ...value, repository: OFFICIAL_REPOSITORY, automatic: value.automatic !== false };
+    if (!sameSource) Object.assign(record, { metadata: null, etag: '', checkedAt: 0, retryAt: 0, notified: '', error: '' });
+    try { if (record.metadata) githubRelease(record.metadata, OFFICIAL_REPOSITORY); }
+    catch (error) { Object.assign(record, { metadata: null, etag: '', checkedAt: 0, retryAt: 0, error: 'Saved release metadata was invalid and will be refreshed.' }); }
+    if (!sameSource) await store(record);
+  }).catch(() => { record.error = 'Update settings could not be restored.'; });
 
   function status() {
     let latest = null;
@@ -74,20 +74,18 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
   }
 
   async function schedule() {
-    if (!record.repository || !record.automatic) { await browser.alarms.clear(UPDATE_ALARM); return; }
+    if (!record.automatic) { await browser.alarms.clear(UPDATE_ALARM); return; }
     const alarm = await browser.alarms.get(UPDATE_ALARM);
     if (!alarm || alarm.periodInMinutes !== 60) await browser.alarms.create(UPDATE_ALARM, { delayInMinutes: 1, periodInMinutes: 60 });
   }
 
   async function configure({ repository, automatic }) {
-    const repo = githubRepository(repository);
+    if (repository !== undefined && githubRepository(repository) !== OFFICIAL_REPOSITORY) throw new Error('The update source is fixed to the official ALLEN Toolbox repository');
     if (typeof automatic !== 'boolean') throw new Error('Choose whether automatic update checks are enabled');
     await ready;
     await commit(async () => {
       revision++; active?.abort();
-      const changed = repo.toLowerCase() !== record.repository.toLowerCase();
-      await store({ ...record, repository: repo, automatic: !!repo && automatic,
-        ...(changed ? { metadata: null, etag: '', checkedAt: 0, retryAt: 0, notified: '' } : {}), error: '' });
+      await store({ ...record, repository: OFFICIAL_REPOSITORY, automatic, error: '' });
     });
     await browser.notifications.clear(NOTICE).catch(() => {});
     await schedule();
@@ -97,7 +95,6 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
   async function check({ force = false } = {}) {
     await ready;
     await writes;
-    if (!record.repository) { if (force) throw new Error('Save a public GitHub repository URL first'); return status(); }
     if (!force && (!record.automatic || now() < (record.retryAt || 0) || now() - (record.checkedAt || 0) < HOUR)) return status();
     if (flight) return flight;
     const snapshot = { ...record }, generation = revision;
@@ -111,7 +108,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
       const timer = setTimeout(() => controller.abort(), timeout);
       let metadata = snapshot.metadata, etag = snapshot.etag, error = '', retryAt = 0, response;
       try {
-        const api = 'https://api.github.com/repos/' + snapshot.repository.slice('https://github.com/'.length) + '/releases/latest';
+        const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + '/releases/latest';
         // Join the same request queue as GM requests, with no captured headers or credentials.
         if (acquireRequest) {
           const acquiring = Promise.resolve(acquireRequest({ url: api, requestId, requestHeaders: [] }));
@@ -123,7 +120,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
         const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
         if (metadata && etag && etag.length < 500 && !/[\r\n]/.test(etag)) headers['If-None-Match'] = etag;
         response = await request(api, { headers, signal: controller.signal, credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer' });
-        if (response.url && response.url !== api) throw new Error('GitHub redirected the update check. Verify the repository URL.');
+        if (response.url && response.url !== api) throw new Error('GitHub redirected the official update check. Try again later.');
         if (response.status === 304) {
           if (!metadata) throw new Error('GitHub returned no cached release. Check again.');
         } else {
@@ -133,7 +130,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
             retryAt = Math.min(now() + 24 * HOUR, Math.max(now() + HOUR, Number.isFinite(reset) ? reset : 0, now() + (Number.isFinite(delay) ? delay : 0)));
             throw new Error('GitHub rate-limited this check. Automatic checks will retry later.');
           }
-          if (response.status === 404) throw new Error('No public release was found. Check the repository URL and publish a release first.');
+          if (response.status === 404) throw new Error('No public release was found at the official update source. Try again later.');
           if (!response.ok) throw new Error('GitHub update check failed (HTTP ' + response.status + ').');
           if (!/\bjson\b/i.test(response.headers.get('content-type') || '')) throw new Error('GitHub returned non-JSON release metadata.');
           const body = await readBody(response, { signal: controller.signal, maxBytes: 512 * 1024, idleTimeout: timeout });
@@ -147,7 +144,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
       } catch (failure) {
         error = controller.signal.aborted ? 'The GitHub update check timed out. Try again.' : failure.code === 'DOWNLOAD_TOO_LARGE' ?
           'GitHub release metadata exceeded its 512 KiB safety limit.' : failure.name === 'TypeError' ?
-          'Could not reach GitHub. Check your connection and repository URL.' : failure.message;
+          'Could not reach GitHub. Check your connection and try again.' : failure.message;
       } finally {
         clearTimeout(timer); controller.signal.removeEventListener('abort', cancelLease);
         controller.abort();

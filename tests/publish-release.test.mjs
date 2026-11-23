@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { publishRelease } from '../tools/publish-release.mjs';
+import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
-const repository = 'https://github.com/example/allen-toolbox', commit = 'a'.repeat(40);
+const repository = OFFICIAL_REPOSITORY, commit = 'a'.repeat(40);
 const hash = (data) => createHash('sha256').update(data).digest('hex');
 const archive = Buffer.from('ZIP fixture'), filename = 'ALLEN-Toolbox-2.1.1.zip', checksum = hash(archive);
 const release = { repository, version: '2.1.1', tag: 'v2.1.1', filename, checksum, blob: new Blob([archive]) };

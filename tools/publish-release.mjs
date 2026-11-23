@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildRelease } from './release.mjs';
-import { githubRepository, versionParts } from '../shared/updates.js';
+import { githubRepository, versionParts, OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hash = (data) => createHash('sha256').update(data).digest('hex');
@@ -14,7 +14,7 @@ const execute = async (command, args) => (await promisify(execFile)(command, arg
 export async function publishRelease({ repository, commit, release, run = execute }) {
   const repo = githubRepository(repository), slug = repo.slice('https://github.com/'.length);
   versionParts(release.version);
-  if (!repo || release.repository !== repo || release.tag !== 'v' + release.version || release.filename !== 'ALLEN-Toolbox-' + release.version + '.zip' ||
+  if (repo !== OFFICIAL_REPOSITORY || release.repository !== repo || release.tag !== 'v' + release.version || release.filename !== 'ALLEN-Toolbox-' + release.version + '.zip' ||
       !/^[a-f\d]{64}$/.test(release.checksum) || !Number.isSafeInteger(release.blob?.size) || release.blob.size <= 0 ||
       !/^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(commit)) throw new Error('Invalid release publication identity');
   const checksumText = release.checksum + '  ' + release.filename + '\n';

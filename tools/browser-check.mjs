@@ -6,13 +6,14 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { crc32, validateZipPath } from '../shared/zip.js';
 import { EXTENSION_ASSETS } from '../shared/package.js';
+import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const options = Object.fromEntries(process.argv.slice(2).map((argument) => {
   const index = argument.indexOf('='); return [argument.slice(0, index), argument.slice(index + 1)];
 }));
 const { chromium } = options['--playwright'] ? await import(pathToFileURL(options['--playwright']).href) : await import('playwright');
 const root = fileURLToPath(new URL('..', import.meta.url));
-const fixtureRepository = 'https://github.com/toolbox-fixture/allen-toolbox';
+const fixtureRepository = OFFICIAL_REPOSITORY;
 const currentVersion = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8')).version.split('.').map(Number);
 currentVersion[currentVersion.length - 1]++;
 const fixtureVersion = currentVersion.join('.');
@@ -86,12 +87,12 @@ async function fixtureExtension() {
     let data = await readFile(join(root, path));
     if (path === 'manifest.json') {
       const manifest = JSON.parse(data.toString('utf8'));
-      delete manifest.homepage_url;
+      manifest.homepage_url = 'https://github.com/other/toolbox';
       data = Buffer.from(JSON.stringify(manifest));
     }
     if (path === 'background.js') {
       // Metadata is a local fixture too: never contact a real GitHub repository during tests.
-      const api = 'https://api.github.com/repos/toolbox-fixture/allen-toolbox/releases/latest';
+      const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + '/releases/latest';
       data = Buffer.from(`const fixtureFetch = globalThis.fetch;
 globalThis.fetch = (input, options) => String(input) === ${JSON.stringify(api)} ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(fixtureRelease))}, { headers: { 'content-type': 'application/json' } })) : fixtureFetch(input, options);
 ` + data.toString('utf8'));
@@ -305,14 +306,12 @@ try {
   await popup.getByRole('tab', { name: 'Utilities', exact: true }).click();
   await assertTabIndicator(popup);
   const beforeUpdates = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'us:bundle-export' }));
-  await popup.locator('#update-repository').fill(fixtureRepository + '/tree/main');
-  await popup.locator('#update-save').click();
-  await popup.waitForFunction(() => document.getElementById('update-repository').getAttribute('aria-invalid') === 'true');
-  const validationMessage = await popup.locator('#update-status').textContent();
-  await popup.waitForTimeout(1100);
-  assert.equal(await popup.locator('#update-status').textContent(), validationMessage, 'Refresh must not erase local validation errors');
-  await popup.locator('#update-repository').fill(fixtureRepository);
-  await popup.locator('#update-save').click();
+  assert.equal(await popup.locator('#update-repository, #update-save').count(), 0, 'Users must not be asked to enter a repository');
+  assert.equal(await popup.locator('#update-source').getAttribute('href'), OFFICIAL_REPOSITORY);
+  const rejectedSource = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'updates:configure', repository: 'https://github.com/other/toolbox', automatic: true }));
+  assert.match(rejectedSource.error, /source is fixed/);
+  const fixedSource = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'updates:get' }));
+  assert.equal(fixedSource.repository, OFFICIAL_REPOSITORY);
   await popup.waitForFunction(() => document.getElementById('update-auto').getAttribute('aria-checked') === 'true');
   await popup.locator('#update-check').click();
   await popup.locator('#update-release').waitFor({ state: 'visible' });
@@ -322,8 +321,7 @@ try {
   assert.deepEqual(afterUpdates, beforeUpdates, 'GitHub checks must not replace saved userscripts');
   await popup.getByRole('switch', { name: 'Automatic update checks', exact: true }).click();
   await popup.waitForFunction(() => document.getElementById('update-auto').getAttribute('aria-checked') === 'false');
-  await popup.locator('#update-repository').fill(''); await popup.locator('#update-save').click();
-  await popup.waitForFunction(() => document.getElementById('update-check').disabled);
+  assert.equal(await popup.locator('#update-check').isEnabled(), true, 'Manual checks stay available after automatic checks are disabled');
   await popup.locator('body').screenshot({ path: join(output, 'popup-utilities.png'), animations: 'disabled' });
   await popup.getByRole('button', { name: 'Remove overlays', exact: true }).click();
   await source.waitForFunction(() => document.getElementById('overlay').style.display === 'none');

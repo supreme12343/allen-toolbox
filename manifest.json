@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ALLEN Toolbox",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "homepage_url": "https://github.com/supreme12343/allen-toolbox",
   "description": "Local study tools: page fixes, PDF/video downloads, utilities and portable userscripts. Credits to Supreme.",
   "minimum_chrome_version": "120",

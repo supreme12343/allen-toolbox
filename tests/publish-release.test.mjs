@@ -28,8 +28,9 @@ function fixture(options = {}) {
       return '';
     }
     if (args[0] === 'api') {
-      if (!env.state) throw Object.assign(new Error('No release'), { stderr: 'gh: Not Found (HTTP 404)' });
-      return JSON.stringify(env.state);
+      if (args[1] === 'graphql') return JSON.stringify(options.lookupResponse || { data: { repository: { release: env.state ? { databaseId: 101 } : null } } });
+      if (args[1].endsWith('/releases/101') && env.state) return JSON.stringify(env.state);
+      throw Object.assign(new Error('No published release at this endpoint'), { stderr: 'gh: Not Found (HTTP 404)' });
     }
     const operation = args[1];
     if (operation === 'create') {
@@ -73,6 +74,24 @@ test('an interrupted checksum upload stays a draft and reruns upload only the mi
   await assert.rejects(env.publish(), /Upload interrupted/); assert.equal(env.state.draft, true); assert.deepEqual(env.state.assets, [expected[0]]);
   await env.publish(); assert.equal(env.state.draft, false); assert.deepEqual(env.state.assets, expected);
   assert.equal(env.calls.filter((call) => call.args[1] === 'upload' && call.args[3] === 'dist/' + filename).length, 1);
+});
+
+test('drafts hidden by the REST tag endpoint are resolved by authenticated release ID', async () => {
+  const env = fixture({ tag: commit, state: draft([expected[0]]) });
+  await env.publish();
+  assert.equal(env.state.draft, false);
+  assert.ok(env.calls.some((call) => call.args[0] === 'api' && call.args[1] === 'graphql'));
+  assert.ok(env.calls.some((call) => call.args[0] === 'api' && call.args[1].endsWith('/releases/101')));
+  assert.ok(!env.calls.some((call) => call.args[1]?.includes('/releases/tags/')));
+  assert.ok(!env.calls.some((call) => call.args[1] === 'create'));
+});
+
+test('unresolved repositories and invalid release IDs cannot create tags or modify releases', async (t) => {
+  for (const lookupResponse of [{ data: { repository: null } }, { data: { repository: { release: { databaseId: 'untrusted' } } } }]) await t.test(JSON.stringify(lookupResponse), async () => {
+    const env = fixture({ lookupResponse });
+    await assert.rejects(env.publish(), /could not be resolved|invalid release identifier/);
+    assert.ok(env.calls.every((call) => call.command === 'gh' && call.args[0] === 'api'));
+  });
 });
 
 test('already published releases are never modified even when the new main commit differs', async () => {

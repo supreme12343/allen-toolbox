@@ -1,4 +1,4 @@
-# ALLEN Toolbox 2.1.1
+# ALLEN Toolbox 2.1.2
 
 A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 
@@ -188,6 +188,7 @@ pdf.js © Mozilla (Apache-2.0). The GM API follows the conventions established b
 
 ## Changelog
 
+* **2.1.2**: deterministic ZIP ordering regardless of concurrent asset reads; authenticated draft-release discovery and verified resumable publication. The unpublished 2.1.1 tag is preserved rather than moved to different source.
 * **2.1.1**: resume server-capped byte ranges without losing or duplicating bytes; retain strict file identity/length checks and HLS validation; add configurable hourly GitHub release checks, update notifications, release ZIP downloads and tested GitHub Actions packaging. Unpacked installations still require replacing files and reloading; stored userscript edits are not overwritten.
 * **2.1.0**: graphite-and-blue interface, compact native popup, updated vector/toolbar logo and responsive dashboard; accessible searchable page fixes and file filters; per-site pause and presets; reversible overlay cleanup and daily utilities; seed-once custom scripts folder with saved-script extension ZIP export; exact request-scoped header leases; stronger PDF fallback, bounded retries/timeouts/range validation, HLS protection/audio checks, and truthful native download completion; regression and isolated-browser checks.
 * **2.0.0** – Userscript manager (Violentmonkey/Tampermonkey-compatible): upload / paste / link install, GM_* and GM.* APIs, `@require`/`@resource`/`@connect`, menu commands, cross-tab values, sandbox mode; `AO` helpers with always-on-top buttons and panels that can use the downloader; new AI prompt for userscripts; early-page-message buffering; UI fixes.

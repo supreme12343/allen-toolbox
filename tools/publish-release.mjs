@@ -20,10 +20,20 @@ export async function publishRelease({ repository, commit, release, run = execut
   const checksumText = release.checksum + '  ' + release.filename + '\n';
   const expected = [{ name: release.filename, size: release.blob.size, digest: 'sha256:' + release.checksum },
     { name: release.filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText) }];
+  let releaseId;
   const readRelease = async () => {
-    let data;
-    try { data = JSON.parse(await run('gh', ['api', 'repos/' + slug + '/releases/tags/' + release.tag])); }
-    catch (error) { if (/\(HTTP\s+404\)/.test(error.stderr || '')) return null; throw error; }
+    if (!releaseId) {
+      const [owner, name] = slug.split('/');
+      // The REST tag endpoint only finds published releases. Resolve drafts by authenticated ID.
+      const query = 'query=query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){databaseId}}}';
+      const lookup = JSON.parse(await run('gh', ['api', 'graphql', '-f', query, '-f', 'owner=' + owner, '-f', 'name=' + name, '-f', 'tag=' + release.tag]));
+      if (!lookup.data?.repository) throw new Error('The publication repository could not be resolved');
+      const target = lookup.data.repository.release;
+      if (!target) return null;
+      if (!Number.isSafeInteger(target.databaseId) || target.databaseId <= 0) throw new Error('GitHub returned an invalid release identifier');
+      releaseId = target.databaseId;
+    }
+    const data = JSON.parse(await run('gh', ['api', 'repos/' + slug + '/releases/' + releaseId]));
     if (data.tag_name !== release.tag || !Array.isArray(data.assets) || typeof data.draft !== 'boolean' || data.prerelease !== false) throw new Error('GitHub returned an invalid or prerelease publication');
     if (data.draft && data.assets.some((asset) => !expected.some((file) => file.name === asset.name))) throw new Error('The draft contains unexpected assets; it was not published');
     return data;

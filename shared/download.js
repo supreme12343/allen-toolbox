@@ -236,6 +236,78 @@ export async function fetchText(url, opts = {}) {
 export async function downloadFile(url, opts = {}) {
   const maxBytes = opts.maxBytes ?? MAX_DOWNLOAD_BYTES;
   const progress = (bytes, total) => opts.onProgress?.({ bytes, total: total || 0 });
+  async function sequential(first) {
+    const { total, response: initial, entity } = first, guardSize = 64 * 1024;
+    const mime = (initial.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const headers = Object.fromEntries(Object.entries(opts.headers || {}).filter(([key]) => !/^(range|if-range|if-none-match|if-modified-since)$/i.test(key)));
+    const sample = new Uint8Array(await first.blob.slice(0, guardSize).arrayBuffer()), parts = [first.blob];
+    let tail = new Uint8Array(await first.blob.slice(-guardSize).arrayBuffer()), cursor = first.len, lastSpan = first.len, count = 0;
+    const budget = Math.max(MAX_HTTP_RANGE_PARTS, Math.ceil(total / MB) * 64);
+    const compare = (actual, expected) => {
+      if (actual.length !== expected.length) throw rangeError();
+      for (let i = 0; i < actual.length; i++) if (actual[i] !== expected[i]) throw new DownloadError('DOWNLOAD_CHANGED', 'The media changed between range requests. Reopen the lecture and retry; no partial file was saved.');
+    };
+    async function readRange(range) {
+      checkAbort(opts.signal);
+      if (++count > budget) throw rangeLimit();
+      const result = await withResponse(url, { ...opts, headers, range }, async (r, signal) => {
+        binaryResponse(r);
+        if (r.status === 200 && !r.headers.get('content-range')) {
+          // An ignored Range may supply the whole file. Never append it to old pieces.
+          const expected = contentLength(r);
+          if (expected != null && expected > maxBytes) throw tooLarge(maxBytes);
+          const out = await readBody(r, { ...opts, signal, maxBytes, onBytes: undefined });
+          if (!out.len || expected != null && out.len !== expected) throw incomplete();
+          return { ...out, complete: true, response: r, total: out.len };
+        }
+        const cr = parseContentRange(r.headers.get('content-range'));
+        if (!cr || cr.end >= range.end) throw rangeError();
+        if (cr.total !== total || (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() !== mime) {
+          throw new DownloadError('DOWNLOAD_CHANGED', 'The media size or type changed between range requests. Reopen the lecture and retry; no partial file was saved.');
+        }
+        validateRange(r, { offset: range.offset, end: cr.end + 1 }, total, entity);
+        let out;
+        try { out = await readBody(r, { ...opts, signal, maxBytes: cr.end - cr.start + 1, onBytes: undefined }); }
+        catch (error) { if (error.code === 'DOWNLOAD_TOO_LARGE') throw rangeError(); throw error; }
+        if (out.len !== cr.end - cr.start + 1) throw incomplete();
+        return { ...out, end: cr.end + 1 };
+      });
+      checkAbort(opts.signal);
+      return result;
+    }
+
+    // Static-media compatibility, not persisted resume or a strong entity guarantee:
+    // inspect adjacent overlap bytes and append only the new, complete suffix.
+    while (cursor < total) {
+      let overlap = Math.min(tail.length, Math.max(1, Math.floor(lastSpan / 4)));
+      let out;
+      for (;;) {
+        out = await readRange({ offset: cursor - overlap, end: Math.min(total, cursor + 8 * MB) });
+        if (out.complete) { progress(out.len, out.len); checkAbort(opts.signal); return out; }
+        const repeated = Math.min(overlap, out.len);
+        compare(new Uint8Array(await out.blob.slice(0, repeated).arrayBuffer()), tail.subarray(tail.length - overlap, tail.length - overlap + repeated));
+        if (out.end > cursor) break;
+        if (overlap === 1) throw rangeError();
+        overlap = Math.max(1, Math.floor(out.len / 2));
+      }
+      const suffix = out.blob.slice(overlap);
+      parts.push(suffix); cursor = out.end; lastSpan = out.len;
+      tail = new Uint8Array(await new Blob([tail, suffix]).slice(-guardSize).arrayBuffer());
+      progress(cursor, total);
+    }
+    // Recheck the leading sample too. These comparisons detect discrepancies, but
+    // cannot authenticate an immutable file version without a server validator.
+    for (let offset = 0; offset < sample.length;) {
+      const out = await readRange({ offset, end: sample.length });
+      if (out.complete) { progress(out.len, out.len); checkAbort(opts.signal); return out; }
+      compare(new Uint8Array(await out.blob.arrayBuffer()), sample.subarray(offset, out.end));
+      offset = out.end;
+    }
+    checkAbort(opts.signal);
+    const blob = new Blob(parts, { type: mime });
+    if (blob.size !== total) throw incomplete();
+    return { blob, len: blob.size, response: initial, verification: 'byte-continuity' };
+  }
   let zeroBased = false;
   // Discard old pieces before one clean restart. Only range responses need an
   // explicit byte-zero request; ordinary-body failures keep a plain GET retry.
@@ -283,6 +355,7 @@ export async function downloadFile(url, opts = {}) {
     const { entity, validator } = first;
     if (!first.resumable) {
       if (!fresh) { first = null; continue; }
+      if (!validator && first.cr && first.len > 0 && first.len < first.total) return sequential(first);
       throw first.err || (!validator && first.cr ? unvalidatedRange() : rangeError());
     }
 

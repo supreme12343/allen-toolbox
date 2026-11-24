@@ -16,6 +16,7 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; }
 header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-shrink: 0; }
 .logo { width: 32px; height: 32px; }
 .head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.head-title { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 .head-text b { font-size: 17px; font-weight: 600; line-height: 1.4; letter-spacing: -.015em; }
 .head-text > span { font-size: 12px; color: var(--mute); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .pill { background: transparent; color: var(--mute); font-size: 12px; font-weight: 500; border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; white-space: nowrap; font-variant-numeric: tabular-nums; }

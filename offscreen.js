@@ -582,7 +582,8 @@ async function runHttp(msg, job) {
   const exact = msg.exactName ? safeFilename(msg.name) : '';
   checkAbort(signal);
   return { blobUrl: URL.createObjectURL(blob), filename: exact || base + '.' + ext, size: blob.size,
-    done: blob.size, total: blob.size, bytes: blob.size, unit: 'bytes', outputRole: /^audio\//.test(ct) ? 'audio' : 'video', notice: '' };
+    done: blob.size, total: blob.size, bytes: blob.size, unit: 'bytes', outputRole: /^audio\//.test(ct) ? 'audio' : 'video',
+    notice: out.verification === 'byte-continuity' ? 'Compatibility download: the server omitted version validators. Range bytes and total length were checked, but file-version identity could not be verified.' : '' };
 }
 
 function throttle(fn, ms) {

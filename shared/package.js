@@ -7,7 +7,7 @@ export const EXTENSION_ASSETS = Object.freeze([
   'content/main.js', 'content/content.js',
   'gm/gm-bg.js', 'gm/gm-runtime.js', 'gm/gm-relay.js',
   'shared/features.js', 'shared/hls.js', 'shared/names.js', 'shared/pdf.js', 'shared/tsaudio.js',
-  'shared/usmeta.js', 'shared/utilities.js', 'shared/download.js', 'shared/updates.js', 'shared/update-meta.js', 'shared/native-updater.js', 'shared/zip.js', 'shared/package.js',
+  'shared/usmeta.js', 'shared/utilities.js', 'shared/download.js', 'shared/updates.js', 'shared/update-meta.js', 'shared/native-updater.js', 'shared/native-updater-config.js', 'shared/zip.js', 'shared/package.js',
   'popup/theme.css', 'popup/popup.html', 'popup/popup.js', 'popup/popup.css', 'popup/editor.html', 'popup/editor.js', 'popup/editor.css',
   'sandbox/check.html', 'sandbox/check.js',
   'icons/icon16.png', 'icons/icon32.png', 'icons/icon48.png', 'icons/icon128.png', 'icons/logo.svg',

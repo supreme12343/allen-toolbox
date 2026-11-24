@@ -8,19 +8,53 @@ param(
 )
 
 $script:AllenInstallerDirectory = $PSScriptRoot
-. (Join-Path $PSScriptRoot 'updater.ps1')
-$script:AllenNativeHostName = 'com.supreme.allen_toolbox_updater'
+# Check the bundle before loading any companion script, even when dot-sourced.
+function Get-AllenInstallerPublisher([string]$Directory) {
+    $publisher = $null
+    try {
+        foreach ($file in @('install.ps1', 'updater.ps1', 'ALLEN-Toolbox-NativeHost.exe')) {
+            $path = Join-Path $Directory $file
+            for ($cursor = $path; $cursor; $cursor = [IO.Path]::GetDirectoryName($cursor)) {
+                try { $attributes = [IO.File]::GetAttributes($cursor) }
+                catch [IO.FileNotFoundException] { throw 'signature-invalid' }
+                catch [IO.DirectoryNotFoundException] { throw 'signature-invalid' }
+                if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'signature-invalid' }
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
+            $certificate = $signature.SignerCertificate
+            if ([string]$signature.Status -cne 'Valid' -or $null -eq $certificate -or $certificate.Thumbprint -cnotmatch '^[A-F0-9]{40}$' -or $certificate.NotBefore.ToUniversalTime() -gt [DateTime]::UtcNow -or $certificate.NotAfter.ToUniversalTime() -lt [DateTime]::UtcNow) { throw 'signature-invalid' }
+            $codeSigning = $false
+            foreach ($extension in $certificate.Extensions) {
+                if ($extension.Oid.Value -eq '2.5.29.37') {
+                    foreach ($usage in ([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$extension).EnhancedKeyUsages) { if ($usage.Value -eq '1.3.6.1.5.5.7.3.3') { $codeSigning = $true } }
+                }
+            }
+            if (-not $codeSigning -or ($publisher -and $publisher.Thumbprint -cne $certificate.Thumbprint)) { throw 'signature-invalid' }
+            $publisher = [pscustomobject]@{ Thumbprint = $certificate.Thumbprint; Certificate = $certificate }
+        }
+        return $publisher
+    } catch { throw 'signature-invalid' }
+}
+try {
+    $script:AllenInstallerPublisher = Get-AllenInstallerPublisher $PSScriptRoot
+    . (Join-Path $PSScriptRoot 'updater.ps1')
+} catch {
+    if ($MyInvocation.InvocationName -eq '.') { throw 'signature-invalid' }
+    [Console]::Error.WriteLine('ALLEN Toolbox installer failed: signature-invalid. No changes were approved or made.')
+    exit 1
+}
+$script:AllenNativeHostName = 'com.supreme.allen_toolbox_updater_v2'
 
 function Get-AllenPowerShellPath {
     return Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 }
 
 function Get-AllenTaskArguments($Config) {
-    return '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $Config.helperDirectory 'updater.ps1') + '" -Command update -Scheduled'
+    return '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy AllSigned -File "' + (Join-Path $Config.helperDirectory 'updater.ps1') + '" -Command update -Scheduled'
 }
 
 function Get-AllenTaskDescription($Config) {
-    return 'ALLEN Toolbox signed updater, protocol 1; helper: ' + $Config.helperDirectory
+    return 'ALLEN Toolbox signed updater, protocol 2; helper: ' + $Config.helperDirectory
 }
 
 function Get-AllenRegistrationSpecs {
@@ -32,41 +66,130 @@ function Get-AllenRegistrationSpecs {
 }
 
 function Get-AllenInstallPlan([string]$Source = '', [string]$Extension = '', [bool]$IsAttach = $false, [bool]$IsUninstall = $false) {
-    $root = Assert-AllenUserDirectory (Join-Path $env:LOCALAPPDATA 'ALLENToolbox')
+    $publisher = Get-AllenInstallerPublisher $script:AllenInstallerDirectory
+    $root = Get-AllenControlledRoot
     $helper = Join-Path $root 'updater'
     if ($IsUninstall) {
         if ($Source -or $Extension -or $IsAttach) { throw 'installation-invalid' }
         $config = Get-AllenInstallation -HelperDirectory $helper -ForUninstall
-        return [pscustomobject]@{ Root = $root; Helper = $helper; Extension = $config.extensionDirectory; Source = ''; Attach = $true; Uninstall = $true; Config = $config }
+        return [pscustomobject]@{ Root = $root; Helper = $helper; Extension = $config.extensionDirectory; Source = ''; Attach = $true; Uninstall = $true; Reinstall = $false; Config = $config; Publisher = $publisher; AddPublisher = $false; Journal = $null }
+    }
+    $existing = $null
+    if ([IO.File]::Exists($helper)) { throw 'installation-invalid' }
+    if ([IO.Directory]::Exists($helper)) {
+        # A directory without valid ownership metadata is never adopted or deleted.
+        $existing = Get-AllenInstallation -HelperDirectory $helper -ForUninstall
+        if ($existing.publisherThumbprint -cne $publisher.Thumbprint) { throw 'signature-invalid' }
+        if ($Extension -and (Get-AllenFullPath $Extension) -cne $existing.extensionDirectory) { throw 'installation-invalid' }
+        $Extension = $existing.extensionDirectory
+        $IsAttach = $true
+    }
+    $journal = Read-AllenInstallJournal $root
+    if ($journal) {
+        if ($journal.config.publisherThumbprint -cne $publisher.Thumbprint -or ($existing -and $existing.installationId -cne $journal.config.installationId)) { throw 'installation-invalid' }
+        if ($Extension -and (Get-AllenFullPath $Extension) -cne $journal.config.extensionDirectory) { throw 'installation-invalid' }
+        $Extension = $journal.config.extensionDirectory
+        $IsAttach = [bool]$journal.attach
     }
     if ($IsAttach -and -not $Extension) { throw 'installation-invalid' }
     if (-not $Extension) { $Extension = Join-Path $root 'extension' }
     $extensionPath = Assert-AllenUserDirectory $Extension
     if ($extensionPath.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or $extensionPath.Equals($helper, [StringComparison]::OrdinalIgnoreCase) -or $extensionPath.StartsWith($helper + '\', [StringComparison]::OrdinalIgnoreCase) -or $helper.StartsWith($extensionPath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'installation-invalid' }
-    if ([IO.File]::Exists($helper) -or [IO.Directory]::Exists($helper)) { throw 'already-installed' }
     if ($IsAttach) {
         $sourcePath = $extensionPath
     } else {
         if (-not $Source) { $Source = Join-Path ([IO.Path]::GetDirectoryName($script:AllenInstallerDirectory)) 'allen-toolbox' }
         $sourcePath = Get-AllenFullPath $Source
-        if ([IO.Directory]::Exists($extensionPath) -or [IO.File]::Exists($extensionPath)) { throw 'extension-path-exists' }
+        if ([IO.Directory]::Exists($extensionPath) -or [IO.File]::Exists($extensionPath)) {
+            if (-not $journal -or -not (Test-AllenInstalledExtensionOwner $extensionPath $journal.config)) { throw 'extension-path-exists' }
+            $sourcePath = $extensionPath
+        }
     }
     $manifest = Test-AllenExtension $sourcePath
     foreach ($file in $script:AllenHelperFiles) { [void](Read-AllenBytes (Join-Path $script:AllenInstallerDirectory $file) 2MB) }
     $key = Get-AllenPublicKey (Join-Path $script:AllenInstallerDirectory 'public-key.json')
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sid = Get-AllenCurrentUserSid
     $config = [pscustomobject][ordered]@{
-        protocol = 1; owner = 'ALLEN Toolbox'; repository = $script:AllenRepository
+        protocol = 2; owner = 'ALLEN Toolbox'; repository = $script:AllenRepository
         helperDirectory = $helper; extensionDirectory = $extensionPath; extensionId = (Get-AllenExtensionId $extensionPath)
         publicKeyFingerprint = $key.Fingerprint; installedVersion = $manifest.version
-        installedAt = (Get-AllenTime); taskName = ('ALLEN Toolbox Updater-' + $sid); disabled = $false
+        publisherThumbprint = $publisher.Thumbprint; installationId = [Guid]::NewGuid().ToString('D')
+        installedAt = (Get-AllenTime); taskName = ('ALLEN Toolbox Updater-' + $sid); disabled = $true; installationState = 'installing'
+        publisherTrust = [pscustomobject]@{ store = 'CurrentUser\TrustedPublisher'; introduced = $false; retainedOnUninstall = $true }
     }
-    return [pscustomobject]@{ Root = $root; Helper = $helper; Extension = $extensionPath; Source = $sourcePath; Attach = $IsAttach; Uninstall = $false; Config = $config }
+    if ($existing) {
+        if ($existing.publicKeyFingerprint -cne $key.Fingerprint) { throw 'signature-invalid' }
+        $config.installationId = $existing.installationId; $config.installedAt = $existing.installedAt
+        if ($existing.publisherTrust) { $config.publisherTrust = $existing.publisherTrust }
+    }
+    if ($journal) { $config = $journal.config }
+    Test-AllenHelperStage $config $script:AllenInstallerDirectory (Join-Path ([IO.Path]::GetDirectoryName($script:AllenInstallerDirectory)) 'Install-ALLEN-Toolbox.cmd')
+    return [pscustomobject]@{ Root = $root; Helper = $helper; Extension = $extensionPath; Source = $sourcePath; Attach = $IsAttach; Uninstall = $false; Reinstall = [bool]$existing; Config = $config; Publisher = $publisher; AddPublisher = (-not (Test-AllenPublisherTrusted $publisher.Thumbprint)); Journal = $journal }
+}
+
+function Test-AllenPublisherTrusted([string]$Thumbprint) {
+    foreach ($location in @([Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser, [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)) {
+        $store = New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublisher', $location)
+        try {
+            $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+            if (@($store.Certificates.Find([Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $Thumbprint, $false)).Count) { return $true }
+        } finally { $store.Close() }
+    }
+    return $false
+}
+
+function Add-AllenVerifiedPublisher($Publisher) {
+    # This is reachable only after the install consent explicitly names this leaf/store.
+    $verified = Get-AllenInstallerPublisher $script:AllenInstallerDirectory
+    if ($verified.Thumbprint -cne $Publisher.Thumbprint) { throw 'signature-invalid' }
+    if (Test-AllenPublisherTrusted $Publisher.Thumbprint) { return $false }
+    $store = New-Object Security.Cryptography.X509Certificates.X509Store('TrustedPublisher', [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+    try {
+        $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $store.Add($verified.Certificate)
+    } finally { $store.Close() }
+    if (-not (Test-AllenPublisherTrusted $Publisher.Thumbprint)) { throw 'publisher-not-trusted' }
+    return $true
+}
+
+function Read-AllenInstallJournal([string]$Root) {
+    $path = Join-Path $Root 'install-transaction.json'
+    if (-not [IO.File]::Exists($path)) { return $null }
+    try {
+        Assert-AllenOwnedPath $Root -Directory
+        $journal = Read-AllenJson $path 32KB
+        $config = $journal.config
+        if ($journal.protocol -isnot [int] -or $journal.protocol -ne 2 -or $journal.owner -cne 'ALLEN Toolbox' -or $journal.userSid -cne (Get-AllenCurrentUserSid) -or $journal.token -cnotmatch '^[a-f0-9]{32}$' -or $journal.attach -isnot [bool] -or $config.protocol -ne 2 -or $config.owner -cne 'ALLEN Toolbox' -or $config.repository -cne $script:AllenRepository -or $config.helperDirectory -cne (Join-Path $Root 'updater') -or $config.publisherThumbprint -cnotmatch '^[A-F0-9]{40}$' -or $config.taskName -cne ('ALLEN Toolbox Updater-' + (Get-AllenCurrentUserSid))) { throw 'transaction-recovery-required' }
+        Assert-AllenClientId $config.installationId
+        $extension = Assert-AllenUserDirectory $config.extensionDirectory
+        if ($extension -cne $config.extensionDirectory -or $extension.Equals($Root, [StringComparison]::OrdinalIgnoreCase) -or $extension.Equals($config.helperDirectory, [StringComparison]::OrdinalIgnoreCase) -or $extension.StartsWith($config.helperDirectory + '\', [StringComparison]::OrdinalIgnoreCase) -or $config.helperDirectory.StartsWith($extension + '\', [StringComparison]::OrdinalIgnoreCase) -or $config.extensionId -cne (Get-AllenExtensionId $extension)) { throw 'transaction-recovery-required' }
+        [void](Get-AllenVersionParts $config.installedVersion)
+        return $journal
+    } catch { throw 'transaction-recovery-required' }
+}
+
+function Get-AllenInstallStagePaths($Plan, [string]$Token) {
+    if ($Token -cnotmatch '^[a-f0-9]{32}$') { throw 'transaction-recovery-required' }
+    return [pscustomobject]@{
+        Helper = (Join-Path $Plan.Root ('.install-' + $Token))
+        Extension = (Join-Path ([IO.Path]::GetDirectoryName($Plan.Extension)) ('.allen-toolbox-install-' + $Token))
+    }
+}
+
+function New-AllenOwnership($Config) {
+    return [pscustomobject]@{ protocol = 2; owner = 'ALLEN Toolbox'; userSid = (Get-AllenCurrentUserSid); helperDirectory = $Config.helperDirectory; installationId = $Config.installationId; publisherThumbprint = $Config.publisherThumbprint }
+}
+
+function Test-AllenInstalledExtensionOwner([string]$Directory, $Config) {
+    try {
+        $owner = Read-AllenJson (Join-Path $Directory '.allen-installation.json') 8KB
+        return $owner.protocol -eq 2 -and $owner.owner -ceq 'ALLEN Toolbox' -and $owner.userSid -ceq (Get-AllenCurrentUserSid) -and $owner.helperDirectory -ceq $Config.helperDirectory -and $owner.installationId -ceq $Config.installationId -and $owner.publisherThumbprint -ceq $Config.publisherThumbprint
+    } catch { return $false }
 }
 
 function Get-AllenConsentText($Plan) {
     $hostManifest = Join-Path $Plan.Helper 'host.json'
-    $instructions = '& "' + (Get-AllenPowerShellPath) + '" -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $Plan.Helper 'install.ps1') + '" -Uninstall'
+    $instructions = '& "' + (Get-AllenPowerShellPath) + '" -NoProfile -ExecutionPolicy AllSigned -File "' + (Join-Path $Plan.Helper 'install.ps1') + '" -Uninstall'
     if ($Plan.Uninstall) {
         return @"
 Uninstall the ALLEN Toolbox external updater for this Windows user?
@@ -76,6 +199,8 @@ Remove ONLY owned Chrome, Edge and Brave HKCU native host registrations:
 $script:AllenNativeHostName (32-bit and 64-bit views)
 Registration target: $hostManifest
 Remove owned helper files: $($Plan.Helper)
+Keep disabled ownership metadata if unknown helper files remain.
+KEEP publisher leaf certificates: they can be shared with other software.
 
 KEEP the unpacked extension folder: $($Plan.Extension)
 KEEP all browser profiles, extension storage, downloads and extension backups.
@@ -86,6 +211,8 @@ Default is No/Cancel. Downloading or reading a README is never consent.
     }
     $operation = 'Copy bundled extension files'
     if ($Plan.Attach) { $operation = 'Keep the existing unpacked extension folder in place' }
+    $publisherAction = 'The verified publisher is already trusted; no certificate will be added.'
+    if ($Plan.AddPublisher) { $publisherAction = 'ADD ONLY the verified code-signing leaf to CurrentUser\TrustedPublisher after this approval. It is retained on uninstall because the publisher can be shared.' }
     return @"
 Install ALLEN Toolbox and its external updater for this Windows user?
 
@@ -100,6 +227,8 @@ The helper will contact ONLY the official public repository over HTTPS:
 $script:AllenRepository
 It checks/updates hourly and at logon using task: $($Plan.Config.taskName)
 Only stable ZIP releases with a pinned RSA-SHA256 signature can replace files.
+ZIP signing is NOT Windows Authenticode signing. Every executable/helper script
+must also have a valid Authenticode signature from the pinned publisher.
 Background updates defer while supported browsers run. Native updates defer
 when the extension reports active downloads. Prior extension folders are retained
 as backups beside the extension, so unexpected local files are not deleted.
@@ -109,7 +238,12 @@ under HKCU Software\{Google\Chrome,Microsoft\Edge,BraveSoftware\Brave-Browser}\N
 (32-bit and 64-bit views), pointing to: $hostManifest
 Allow ONLY chrome-extension://$($Plan.Config.extensionId)/
 No administrator rights, browser Preferences/profile edits, or global policy changes.
-ExecutionPolicy Bypass applies only to helper PowerShell processes, not your system.
+PowerShell helper/task processes use AllSigned. Enterprise policy is not bypassed.
+Verified CodeSigning publisher thumbprint: $($Plan.Publisher.Thumbprint)
+Certificate store: CurrentUser\TrustedPublisher (verified leaf ONLY, never TrustedRoot)
+$publisherAction
+Create per-user owned lock/activity/installation recovery metadata under: $($Plan.Root)
+Interrupted installation can be resumed by this signed installer; unknown files stay.
 
 You must still enable Developer mode and use Load unpacked ONCE in each browser:
 $($Plan.Extension)
@@ -147,10 +281,11 @@ function Assert-AllenInstallSlots($Config) {
         $key = $null
         try {
             $key = $root.OpenSubKey($spec.Path)
-            if ($key) { throw 'registration-exists' }
+            if ($key -and ($key.GetValue('ALLENToolboxOwner') -cne $Config.helperDirectory -or $key.GetValue('') -cne (Join-Path $Config.helperDirectory 'host.json'))) { throw 'registration-exists' }
         } finally { if ($key) { $key.Dispose() }; $root.Dispose() }
     }
-    if (Get-ScheduledTask -TaskName $Config.taskName -TaskPath '\' -ErrorAction SilentlyContinue) { throw 'task-exists' }
+    $task = Get-ScheduledTask -TaskName $Config.taskName -TaskPath '\' -ErrorAction SilentlyContinue
+    if ($task -and ($task.Description -cne (Get-AllenTaskDescription $Config) -or @($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -cne (Get-AllenPowerShellPath) -or $task.Actions[0].Arguments -cne (Get-AllenTaskArguments $Config))) { throw 'task-exists' }
 }
 
 function Register-AllenNativeHost($Config) {
@@ -183,9 +318,14 @@ function Unregister-AllenNativeHost($Config) {
 }
 
 function Register-AllenTask($Config) {
+    $existing = Get-ScheduledTask -TaskName $Config.taskName -TaskPath '\' -ErrorAction SilentlyContinue
+    if ($existing) {
+        if ($existing.Description -cne (Get-AllenTaskDescription $Config) -or @($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -cne (Get-AllenPowerShellPath) -or $existing.Actions[0].Arguments -cne (Get-AllenTaskArguments $Config)) { throw 'task-exists' }
+        return
+    }
     $action = New-ScheduledTaskAction -Execute (Get-AllenPowerShellPath) -Argument (Get-AllenTaskArguments $Config)
     $hourly = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5)) -RepetitionInterval (New-TimeSpan -Hours 1)
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $sid = Get-AllenCurrentUserSid
     $logon = New-ScheduledTaskTrigger -AtLogOn -User $sid
     $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -200,7 +340,7 @@ function Unregister-AllenTask($Config) {
     Unregister-ScheduledTask -TaskName $Config.taskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
 }
 
-function Copy-AllenExtension([string]$Source, [string]$Destination) {
+function Copy-AllenExtension([string]$Source, [string]$Destination, [switch]$Resume) {
     $paths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $inventory = [Text.Encoding]::UTF8.GetString((Read-AllenBytes (Join-Path $Source 'shared/package.js') 2MB))
     $match = [regex]::Match($inventory, 'export\s+const\s+EXTENSION_ASSETS\s*=\s*Object\.freeze\(\s*\[(.*?)\]\s*\)', [Text.RegularExpressions.RegexOptions]::Singleline)
@@ -214,17 +354,21 @@ function Copy-AllenExtension([string]$Source, [string]$Destination) {
         $relative = Get-AllenLocalAsset $Source $path
         $target = Join-Path $Destination $relative.Replace('/', '\')
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
-        [IO.File]::Copy((Join-Path $Source $relative.Replace('/', '\')), $target, $false)
+        Assert-AllenNoReparse $target
+        if ($Resume -and [IO.File]::Exists($target)) { Write-AllenBytesAtomic $target (Read-AllenBytes (Join-Path $Source $relative.Replace('/', '\')) 64MB) }
+        else { [IO.File]::Copy((Join-Path $Source $relative.Replace('/', '\')), $target, $false) }
     }
     [void](Test-AllenExtension $Destination)
 }
 
 function Remove-AllenOwnedHelper($Config) {
     $helper = Assert-AllenUserDirectory $Config.helperDirectory
+    $owned = Get-AllenInstallation -HelperDirectory $helper -ForUninstall
+    if ($owned.installationId -cne $Config.installationId) { throw 'installation-invalid' }
     Assert-AllenNoReparse $helper -Recurse
     if ([IO.File]::Exists((Join-Path $helper 'transaction.json'))) { throw 'transaction-recovery-required' }
     # Unknown files are left alone; uninstall never recursively deletes an extension.
-    foreach ($file in @('host.json', 'state.json', 'activity.json', 'ALLEN-Toolbox-NativeHost.exe', 'native-host.cs', 'updater.ps1', 'install.ps1', 'public-key.json', 'installation.json')) {
+    foreach ($file in @('ALLEN-Toolbox-NativeHost.exe', 'updater.ps1', 'install.ps1', 'public-key.json', 'host.json', 'state.json', 'availability.json')) {
         $path = Join-Path $helper $file
         if ([IO.File]::Exists($path)) {
             try { [IO.File]::Delete($path) }
@@ -232,22 +376,15 @@ function Remove-AllenOwnedHelper($Config) {
             catch [UnauthorizedAccessException] { throw 'helper-files-in-use' }
         }
     }
-    if ([IO.Directory]::Exists($helper) -and -not @([IO.Directory]::EnumerateFileSystemEntries($helper)).Count) { [IO.Directory]::Delete($helper) }
-}
-
-function Compile-AllenNativeHost([string]$HelperDirectory) {
-    $helper = Assert-AllenUserDirectory $HelperDirectory
-    $temporary = Join-Path $helper ('.compile-' + [Guid]::NewGuid().ToString('N'))
-    [void][IO.Directory]::CreateDirectory($temporary)
-    try {
-        $compiler = New-Object CodeDom.Compiler.CompilerParameters
-        $compiler.TempFiles = New-Object CodeDom.Compiler.TempFileCollection($temporary, $false)
-        $compiler.GenerateExecutable = $true; $compiler.GenerateInMemory = $false
-        $compiler.OutputAssembly = Join-Path $helper 'ALLEN-Toolbox-NativeHost.exe'
-        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-        foreach ($assembly in @([Uri].Assembly, [Linq.Enumerable].Assembly, [Web.Script.Serialization.JavaScriptSerializer].Assembly)) { [void]$compiler.ReferencedAssemblies.Add($assembly.Location) }
-        Add-Type -Path (Join-Path $helper 'native-host.cs') -CompilerParameters $compiler -ErrorAction Stop
-    } finally { Remove-AllenStage $temporary }
+    $remaining = @([IO.Directory]::EnumerateFileSystemEntries($helper) | Where-Object { [IO.Path]::GetFileName($_) -notin @('installation.json', 'ownership.json') })
+    if ($remaining.Count) {
+        $disabled = $owned.PSObject.Copy(); $disabled.disabled = $true; $disabled.installationState = 'uninstalled'
+        Write-AllenJsonAtomic (Join-Path $helper 'installation.json') $disabled
+    } else {
+        [IO.File]::Delete((Join-Path $helper 'installation.json'))
+        [IO.File]::Delete((Join-Path $helper 'ownership.json'))
+        [IO.Directory]::Delete($helper)
+    }
 }
 
 function Invoke-AllenInstaller([string]$Source = '', [string]$Extension = '', [bool]$IsAttach = $false, [bool]$IsUninstall = $false, [bool]$UseConsole = $false) {
@@ -257,62 +394,119 @@ function Invoke-AllenInstaller([string]$Source = '', [string]$Extension = '', [b
     if (-not (Request-AllenConsent $plan $UseConsole)) {
         return [pscustomobject]@{ cancelled = $true; installed = $false; uninstalled = $false; extensionDirectory = $plan.Extension }
     }
-    $mutex = New-Object Threading.Mutex($false, (Get-AllenMutexName $plan.Config))
-    $held = $false
+    $lock = $null
     try {
-        try { $held = $mutex.WaitOne(2000) } catch [Threading.AbandonedMutexException] { $held = $true }
-        if (-not $held) { throw 'update-in-progress' }
+        [void](Get-AllenInstallerPublisher $script:AllenInstallerDirectory)
+        New-AllenOwnedDirectory $plan.Root
+        New-AllenOwnedDirectory (Join-Path $plan.Root 'locks')
+        New-AllenOwnedDirectory (Join-Path $plan.Root 'activity')
+        $lock = Enter-AllenLock $plan.Config
         if ($plan.Uninstall) {
-            if ([IO.File]::Exists((Join-Path $plan.Helper 'transaction.json'))) { throw 'transaction-recovery-required' }
+            $current = Get-AllenInstallation -HelperDirectory $plan.Helper -ForUninstall
+            if ($current.installationId -cne $plan.Config.installationId) { throw 'installation-invalid' }
+            if (Repair-AllenTransaction $current) { throw 'recovery-deferred' }
             # Existing native connections cannot continue updates if the EXE is locked.
             $disabledConfig = $plan.Config.PSObject.Copy(); $disabledConfig.disabled = $true
             Write-AllenJsonAtomic (Join-Path $plan.Helper 'installation.json') $disabledConfig
             Unregister-AllenTask $plan.Config
             Unregister-AllenNativeHost $plan.Config
+            $pending = Read-AllenInstallJournal $plan.Root
+            if ($pending -and $pending.config.installationId -cne $plan.Config.installationId) { throw 'installation-invalid' }
             Remove-AllenOwnedHelper $plan.Config
+            if ($pending) { [IO.File]::Delete((Join-Path $plan.Root 'install-transaction.json')) }
             return [pscustomobject]@{ cancelled = $false; installed = $false; uninstalled = $true; extensionDirectory = $plan.Extension }
         }
-        $helperCreated = $false; $extensionCreated = $false; $registered = $false; $taskRegistered = $false
         Assert-AllenInstallSlots $plan.Config
         Assert-AllenNoReparse $plan.Helper
-        if ([IO.File]::Exists($plan.Helper) -or [IO.Directory]::Exists($plan.Helper)) { throw 'already-installed' }
-        try {
-            Assert-AllenNoReparse $plan.Root
-            [void][IO.Directory]::CreateDirectory($plan.Helper)
-            $helperCreated = $true
-            foreach ($file in $script:AllenHelperFiles) { [IO.File]::Copy((Join-Path $script:AllenInstallerDirectory $file), (Join-Path $plan.Helper $file), $false) }
-            Test-AllenHelperStage $plan.Config $plan.Helper
-            Compile-AllenNativeHost $plan.Helper
-            if (-not $plan.Attach) {
-                Assert-AllenNoReparse $plan.Extension
-                if ([IO.Directory]::Exists($plan.Extension) -or [IO.File]::Exists($plan.Extension)) { throw 'extension-path-exists' }
-                [void][IO.Directory]::CreateDirectory($plan.Extension)
-                $extensionCreated = $true
-                Copy-AllenExtension $plan.Source $plan.Extension
-            }
-            [void](Test-AllenExtension $plan.Extension $plan.Config.installedVersion)
-            Write-AllenJsonAtomic (Join-Path $plan.Helper 'installation.json') $plan.Config
-            $hostManifest = [pscustomobject][ordered]@{
-                name = $script:AllenNativeHostName; description = 'ALLEN Toolbox signed external updater'
-                path = (Join-Path $plan.Helper 'ALLEN-Toolbox-NativeHost.exe'); type = 'stdio'
-                allowed_origins = @('chrome-extension://' + $plan.Config.extensionId + '/')
-            }
-            Write-AllenJsonAtomic (Join-Path $plan.Helper 'host.json') $hostManifest
-            $state = New-AllenState; $state.installedVersion = $plan.Config.installedVersion; $state.extensionId = $plan.Config.extensionId
-            Write-AllenJsonAtomic (Join-Path $plan.Helper 'state.json') $state
-            $registered = $true
-            Register-AllenNativeHost $plan.Config
-            $taskRegistered = $true
-            Register-AllenTask $plan.Config
-            return [pscustomobject]@{ cancelled = $false; installed = $true; uninstalled = $false; extensionDirectory = $plan.Extension; extensionId = $plan.Config.extensionId; helperDirectory = $plan.Helper; taskName = $plan.Config.taskName }
-        } catch {
-            if ($taskRegistered) { try { Unregister-AllenTask $plan.Config } catch { } }
-            if ($registered) { try { Unregister-AllenNativeHost $plan.Config } catch { } }
-            if ($extensionCreated) { try { Remove-AllenStage $plan.Extension } catch { } }
-            if ($helperCreated) { try { Remove-AllenOwnedHelper $plan.Config } catch { } }
-            throw
+        if ([IO.File]::Exists($plan.Helper)) { throw 'installation-invalid' }
+        $existing = $null
+        if ([IO.Directory]::Exists($plan.Helper)) {
+            $existing = Get-AllenInstallation -HelperDirectory $plan.Helper -ForUninstall
+            if ($existing.installationId -cne $plan.Config.installationId -or $existing.publisherThumbprint -cne $plan.Config.publisherThumbprint) { throw 'installation-invalid' }
+            if (Repair-AllenTransaction $existing) { throw 'recovery-deferred' }
         }
-    } finally { if ($held) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+        Test-AllenHelperStage $plan.Config $script:AllenInstallerDirectory (Join-Path ([IO.Path]::GetDirectoryName($script:AllenInstallerDirectory)) 'Install-ALLEN-Toolbox.cmd')
+        $journal = Read-AllenInstallJournal $plan.Root
+        if ($journal -and $journal.config.installationId -cne $plan.Config.installationId) { throw 'transaction-recovery-required' }
+        if (-not $journal) {
+            $journal = [pscustomobject]@{ protocol = 2; owner = 'ALLEN Toolbox'; userSid = (Get-AllenCurrentUserSid); token = [Guid]::NewGuid().ToString('N'); attach = [bool]$plan.Attach; config = $plan.Config }
+        }
+        $stages = Get-AllenInstallStagePaths $plan $journal.token
+        if ([IO.Directory]::Exists($stages.Helper)) {
+            try {
+                $owner = Read-AllenJson (Join-Path $stages.Helper 'ownership.json') 8KB
+                if ($owner.protocol -isnot [int] -or $owner.protocol -ne 2 -or $owner.owner -cne 'ALLEN Toolbox' -or $owner.installationId -cne $plan.Config.installationId -or $owner.helperDirectory -cne $plan.Helper -or $owner.publisherThumbprint -cne $plan.Config.publisherThumbprint -or $owner.userSid -cne (Get-AllenCurrentUserSid)) { throw 'installation-invalid' }
+            } catch {
+                # Preserve an unowned interrupted stage; use a new owned stage instead.
+                $journal.token = [Guid]::NewGuid().ToString('N')
+                $stages = Get-AllenInstallStagePaths $plan $journal.token
+            }
+        }
+        $plan.Config.disabled = $true; $plan.Config.installationState = 'installing'
+        $journal.config = $plan.Config
+        # Persist recovery/ownership intent before helper, extension or registration work.
+        Write-AllenJsonAtomic (Join-Path $plan.Root 'install-transaction.json') $journal
+        New-AllenOwnedDirectory $stages.Helper
+        Write-AllenJsonAtomic (Join-Path $stages.Helper 'ownership.json') (New-AllenOwnership $plan.Config)
+        Write-AllenJsonAtomic (Join-Path $stages.Helper 'installation.json') $plan.Config
+        foreach ($file in $script:AllenHelperFiles) { Write-AllenBytesAtomic (Join-Path $stages.Helper $file) (Read-AllenBytes (Join-Path $script:AllenInstallerDirectory $file) 2MB) }
+        Test-AllenHelperStage $plan.Config $stages.Helper
+        if ($existing) {
+            Write-AllenJsonAtomic (Join-Path $plan.Helper 'installation.json') $plan.Config
+            foreach ($file in $script:AllenHelperFiles) {
+                if ($file -in $script:AllenSignedHelperFiles) { [void](Get-AllenCodeSigningPublisher (Join-Path $stages.Helper $file) $plan.Config.publisherThumbprint) }
+                Write-AllenBytesAtomic (Join-Path $plan.Helper $file) (Read-AllenBytes (Join-Path $stages.Helper $file) 2MB)
+            }
+        } else {
+            if ([IO.Directory]::Exists($plan.Helper) -or [IO.File]::Exists($plan.Helper)) { throw 'installation-invalid' }
+            [IO.Directory]::Move($stages.Helper, $plan.Helper)
+        }
+        if (-not $journal.attach) {
+            Assert-AllenNoReparse $plan.Extension
+            if ([IO.Directory]::Exists($plan.Extension) -or [IO.File]::Exists($plan.Extension)) {
+                if (-not (Test-AllenInstalledExtensionOwner $plan.Extension $plan.Config)) { throw 'extension-path-exists' }
+            } else {
+                if ([IO.Directory]::Exists($stages.Extension) -or [IO.File]::Exists($stages.Extension)) {
+                    if (-not (Test-AllenInstalledExtensionOwner $stages.Extension $plan.Config)) { throw 'transaction-recovery-required' }
+                    # Resume only the verified package inventory; preserve any unknown files.
+                    Copy-AllenExtension $plan.Source $stages.Extension -Resume
+                } else {
+                    New-AllenOwnedDirectory $stages.Extension
+                    Write-AllenJsonAtomic (Join-Path $stages.Extension '.allen-installation.json') (New-AllenOwnership $plan.Config)
+                    Copy-AllenExtension $plan.Source $stages.Extension
+                }
+                [void](Test-AllenExtension $stages.Extension $plan.Config.installedVersion)
+                [IO.Directory]::Move($stages.Extension, $plan.Extension)
+            }
+        }
+        [void](Test-AllenExtension $plan.Extension $plan.Config.installedVersion)
+        if ($plan.AddPublisher) {
+            $plan.Config.publisherTrust.introduced = [bool](Add-AllenVerifiedPublisher $plan.Publisher)
+            $journal.config = $plan.Config
+            Write-AllenJsonAtomic (Join-Path $plan.Root 'install-transaction.json') $journal
+        }
+        if (-not (Test-AllenPublisherTrusted $plan.Config.publisherThumbprint)) { throw 'publisher-not-trusted' }
+        $hostManifest = [pscustomobject][ordered]@{
+            name = $script:AllenNativeHostName; description = 'ALLEN Toolbox signed external updater'
+            path = (Join-Path $plan.Helper 'ALLEN-Toolbox-NativeHost.exe'); type = 'stdio'
+            allowed_origins = @('chrome-extension://' + $plan.Config.extensionId + '/')
+        }
+        Write-AllenJsonAtomic (Join-Path $plan.Helper 'host.json') $hostManifest
+        Register-AllenNativeHost $plan.Config
+        Register-AllenTask $plan.Config
+        $plan.Config.disabled = $false; $plan.Config.installationState = 'installed'
+        Write-AllenJsonAtomic (Join-Path $plan.Helper 'installation.json') $plan.Config
+        $state = Read-AllenState $plan.Config; $state.installedVersion = $plan.Config.installedVersion
+        $state.state = 'up-to-date'; $state.error = ''; $state.availableVersion = $null
+        Write-AllenJsonAtomic (Join-Path $plan.Helper 'state.json') $state
+        [void](Get-AllenInstallation $plan.Helper)
+        [IO.File]::Delete((Join-Path $plan.Root 'install-transaction.json'))
+        if ([IO.Directory]::Exists($stages.Helper)) {
+            foreach ($file in $script:AllenHelperFiles + @('installation.json', 'ownership.json')) { [IO.File]::Delete((Join-Path $stages.Helper $file)) }
+            if (-not @([IO.Directory]::EnumerateFileSystemEntries($stages.Helper)).Count) { [IO.Directory]::Delete($stages.Helper) }
+        }
+        return [pscustomobject]@{ cancelled = $false; installed = $true; uninstalled = $false; extensionDirectory = $plan.Extension; extensionId = $plan.Config.extensionId; helperDirectory = $plan.Helper; taskName = $plan.Config.taskName }
+    } finally { if ($lock) { $lock.Dispose() } }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

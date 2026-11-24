@@ -3,20 +3,26 @@ param(
     [ValidateSet('status', 'check', 'update')][string]$Command = 'status',
     [switch]$Busy,
     [switch]$Scheduled,
-    [switch]$Native
+    [switch]$Native,
+    [string]$ClientId = '',
+    [switch]$ActivityRecorded
 )
 
 $script:AllenUpdaterDirectory = $PSScriptRoot
 $script:AllenRepository = 'https://github.com/supreme12343/allen-toolbox'
 $script:AllenReleaseApi = 'https://api.github.com/repos/supreme12343/allen-toolbox/releases/latest'
-$script:AllenHelperFiles = @('install.ps1', 'updater.ps1', 'native-host.cs', 'public-key.json')
+$script:AllenHelperFiles = @('install.ps1', 'updater.ps1', 'ALLEN-Toolbox-NativeHost.exe', 'public-key.json')
+$script:AllenSignedHelperFiles = @('install.ps1', 'updater.ps1', 'ALLEN-Toolbox-NativeHost.exe')
+$script:AllenMutableHelperFiles = @('updater.ps1', 'install.ps1')
+$script:AllenActivityLifetime = 180000L
 $script:AllenArchiveLimit = 64MB
 $script:AllenExtractLimit = 256MB
 $script:AllenErrorCodes = @(
     'installation-invalid', 'package-invalid', 'release-invalid', 'release-not-found',
     'network-error', 'network-timeout', 'download-too-large', 'signature-invalid',
     'archive-invalid', 'transaction-failed', 'transaction-recovery-required',
-    'active-downloads', 'browser-running', 'update-in-progress', 'internal-error'
+    'active-downloads', 'browser-running', 'update-in-progress', 'recovery-deferred',
+    'publisher-not-trusted', 'reattach-required', 'internal-error'
 )
 
 function Get-AllenTime {
@@ -62,14 +68,19 @@ function Assert-AllenUserDirectory([string]$Path) {
     $full = Get-AllenFullPath $Path
     $profile = Get-AllenFullPath $env:USERPROFILE
     if (-not $full.StartsWith($profile + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'installation-invalid' }
-    # An unpacked extension folder is not a browser profile or a browser-managed install.
+    # Neither a browser container nor an ancestor of it can be an update target.
     foreach ($relative in @(
-        'AppData\Local\Google\Chrome\User Data', 'AppData\Local\Microsoft\Edge\User Data',
-        'AppData\Local\BraveSoftware\Brave-Browser\User Data', 'AppData\Roaming\Mozilla',
-        'AppData\Local\Mozilla', 'AppData\Local\Chromium\User Data'
+        'AppData\Local\Google\Chrome', 'AppData\Local\Google\Chrome Beta',
+        'AppData\Local\Google\Chrome Dev', 'AppData\Local\Google\Chrome SxS',
+        'AppData\Local\Microsoft\Edge', 'AppData\Local\Microsoft\Edge Beta',
+        'AppData\Local\Microsoft\Edge Dev', 'AppData\Local\Microsoft\Edge SxS',
+        'AppData\Local\BraveSoftware\Brave-Browser', 'AppData\Local\BraveSoftware\Brave-Browser-Beta',
+        'AppData\Local\BraveSoftware\Brave-Browser-Nightly', 'AppData\Roaming\Mozilla',
+        'AppData\Local\Mozilla', 'AppData\Local\Chromium', 'AppData\Local\Vivaldi',
+        'AppData\Local\Opera Software', 'AppData\Roaming\Opera Software'
     )) {
         $blocked = $profile + '\' + $relative
-        if ($full.Equals($blocked, [StringComparison]::OrdinalIgnoreCase) -or $full.StartsWith($blocked + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'installation-invalid' }
+        if ($full.Equals($blocked, [StringComparison]::OrdinalIgnoreCase) -or $full.StartsWith($blocked + '\', [StringComparison]::OrdinalIgnoreCase) -or $blocked.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'installation-invalid' }
     }
     Assert-AllenNoReparse $full
     return $full
@@ -79,6 +90,97 @@ function Get-AllenHexHash([byte[]]$Bytes) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
+}
+
+function Get-AllenCurrentUserSid {
+    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Get-AllenControlledRoot {
+    return Assert-AllenUserDirectory (Join-Path $env:LOCALAPPDATA 'ALLENToolbox')
+}
+
+function Assert-AllenOwnedPath([string]$Path, [switch]$Directory) {
+    Assert-AllenNoReparse $Path
+    if ($Directory) { $security = [IO.Directory]::GetAccessControl($Path) }
+    else { $security = [IO.File]::GetAccessControl($Path) }
+    $sid = Get-AllenCurrentUserSid
+    if ($security.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $sid) { throw 'installation-invalid' }
+    $writeRights = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($rule in $security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $writeRights) -and $rule.IdentityReference.Value -notin @($sid, 'S-1-5-18', 'S-1-5-32-544')) { throw 'installation-invalid' }
+    }
+}
+
+function New-AllenOwnedDirectory([string]$Path) {
+    Assert-AllenNoReparse $Path
+    if ([IO.File]::Exists($Path)) { throw 'installation-invalid' }
+    if (-not [IO.Directory]::Exists($Path)) {
+        $sid = New-Object Security.Principal.SecurityIdentifier (Get-AllenCurrentUserSid)
+        $security = New-Object Security.AccessControl.DirectorySecurity
+        $security.SetOwner($sid)
+        $security.SetAccessRuleProtection($true, $false)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit', [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+        $security.AddAccessRule($rule)
+        [void][IO.Directory]::CreateDirectory($Path, $security)
+    }
+    Assert-AllenOwnedPath $Path -Directory
+}
+
+function Enter-AllenLock($Config, [string]$Name = 'update', [int]$TimeoutMilliseconds = 2000) {
+    if ($Name -cnotmatch '^(update|activity-[a-f0-9-]{36})$' -or $TimeoutMilliseconds -lt 0 -or $TimeoutMilliseconds -gt 2000) { throw 'installation-invalid' }
+    $root = Get-AllenControlledRoot
+    if ($Config.helperDirectory -cne (Join-Path $root 'updater')) { throw 'installation-invalid' }
+    $directory = Join-Path $root 'locks'
+    Assert-AllenOwnedPath $root -Directory
+    Assert-AllenOwnedPath $directory -Directory
+    $path = Join-Path $directory ($Name + '.lock')
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        Assert-AllenNoReparse $path
+        if ([IO.File]::Exists($path)) { Assert-AllenOwnedPath $path }
+        try {
+            $lock = New-Object IO.FileStream($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            try { Assert-AllenOwnedPath $path; return $lock } catch { $lock.Dispose(); throw }
+        } catch [IO.IOException] {
+            if ($clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) { throw 'update-in-progress' }
+            Start-Sleep -Milliseconds 25
+        }
+    }
+}
+
+function Assert-AllenClientId([string]$Id) {
+    $parsed = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($Id, 'D', [ref]$parsed) -or $Id -cne $parsed.ToString('D')) { throw 'installation-invalid' }
+}
+
+function Get-AllenCodeSigningPublisher([string]$Path, [string]$ExpectedThumbprint = '') {
+    try {
+        Assert-AllenNoReparse $Path
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+        $certificate = $signature.SignerCertificate
+        if ([string]$signature.Status -cne 'Valid' -or $null -eq $certificate -or $certificate.Thumbprint -cnotmatch '^[A-F0-9]{40}$' -or $certificate.NotBefore.ToUniversalTime() -gt [DateTime]::UtcNow -or $certificate.NotAfter.ToUniversalTime() -lt [DateTime]::UtcNow) { throw 'signature-invalid' }
+        $codeSigning = $false
+        foreach ($extension in $certificate.Extensions) {
+            if ($extension.Oid.Value -eq '2.5.29.37') {
+                foreach ($usage in ([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$extension).EnhancedKeyUsages) {
+                    if ($usage.Value -eq '1.3.6.1.5.5.7.3.3') { $codeSigning = $true }
+                }
+            }
+        }
+        if (-not $codeSigning -or ($ExpectedThumbprint -and $certificate.Thumbprint -cne $ExpectedThumbprint)) { throw 'signature-invalid' }
+        return [pscustomobject]@{ Thumbprint = $certificate.Thumbprint; Certificate = $certificate }
+    } catch { throw 'signature-invalid' }
+}
+
+function Assert-AllenHelperPublisher([string]$Directory, [string]$ExpectedThumbprint = '') {
+    $publisher = $null
+    foreach ($file in $script:AllenSignedHelperFiles) {
+        $verified = Get-AllenCodeSigningPublisher (Join-Path $Directory $file) $ExpectedThumbprint
+        if (-not $ExpectedThumbprint) { $ExpectedThumbprint = $verified.Thumbprint; $publisher = $verified }
+        elseif (-not $publisher) { $publisher = $verified }
+    }
+    return $publisher
 }
 
 function Get-AllenExtensionId([string]$Directory) {
@@ -181,7 +283,7 @@ function Assert-AllenSignature([byte[]]$Archive, [byte[]]$Signature, [string]$Ke
 function Get-AllenManifest([string]$Directory, [string]$ExpectedVersion = '') {
     try {
         $manifest = Read-AllenJson (Join-Path $Directory 'manifest.json') 256KB
-        if ($manifest.manifest_version -isnot [int] -or $manifest.manifest_version -ne 3 -or $manifest.name -cne 'ALLEN Toolbox' -or $manifest.homepage_url -cne $script:AllenRepository -or $manifest.version -isnot [string]) { throw 'package-invalid' }
+        if ($manifest.manifest_version -isnot [int] -or $manifest.manifest_version -ne 3 -or $manifest.name -cne 'ALLEN Toolbox' -or $manifest.homepage_url -cne $script:AllenRepository -or $manifest.version -isnot [string] -or 'key' -in @($manifest.PSObject.Properties.Name)) { throw 'package-invalid' }
         [void](Get-AllenVersionParts $manifest.version)
         if ($ExpectedVersion -and $manifest.version -cne $ExpectedVersion) { throw 'package-invalid' }
         return $manifest
@@ -191,31 +293,37 @@ function Get-AllenManifest([string]$Directory, [string]$ExpectedVersion = '') {
 function Get-AllenInstallation([string]$HelperDirectory = $script:AllenUpdaterDirectory, [switch]$ForUninstall) {
     try {
         $helper = Assert-AllenUserDirectory $HelperDirectory
+        $root = Get-AllenControlledRoot
+        if ($helper -cne (Join-Path $root 'updater')) { throw 'installation-invalid' }
+        Assert-AllenOwnedPath $root -Directory
+        Assert-AllenOwnedPath $helper -Directory
         $config = Read-AllenJson (Join-Path $helper 'installation.json') 16KB
-        if ($config.protocol -isnot [int] -or $config.protocol -ne 1 -or $config.owner -cne 'ALLEN Toolbox' -or $config.repository -cne $script:AllenRepository -or $config.helperDirectory -cne $helper) { throw 'installation-invalid' }
+        if ($config.protocol -isnot [int] -or $config.protocol -ne 2 -or $config.owner -cne 'ALLEN Toolbox' -or $config.repository -cne $script:AllenRepository -or $config.helperDirectory -cne $helper -or $config.publisherThumbprint -cnotmatch '^[A-F0-9]{40}$' -or $config.disabled -isnot [bool] -or $config.installationState -notin @('installing', 'installed', 'uninstalled') -or $config.taskName -cne ('ALLEN Toolbox Updater-' + (Get-AllenCurrentUserSid))) { throw 'installation-invalid' }
+        Assert-AllenClientId $config.installationId
+        $owner = Read-AllenJson (Join-Path $helper 'ownership.json') 8KB
+        if ($owner.protocol -isnot [int] -or $owner.protocol -ne 2 -or $owner.owner -cne 'ALLEN Toolbox' -or $owner.userSid -cne (Get-AllenCurrentUserSid) -or $owner.helperDirectory -cne $helper -or $owner.installationId -cne $config.installationId -or $owner.publisherThumbprint -cne $config.publisherThumbprint) { throw 'installation-invalid' }
         $extension = Assert-AllenUserDirectory $config.extensionDirectory
         if ($extension -cne $config.extensionDirectory -or $extension.StartsWith($helper + '\', [StringComparison]::OrdinalIgnoreCase) -or $helper.StartsWith($extension + '\', [StringComparison]::OrdinalIgnoreCase) -or $extension.Equals($helper, [StringComparison]::OrdinalIgnoreCase)) { throw 'installation-invalid' }
         if ($config.extensionId -cne (Get-AllenExtensionId $extension)) { throw 'installation-invalid' }
         if (-not $ForUninstall) {
-            if ($config.disabled -isnot [bool] -or $config.disabled) { throw 'installation-invalid' }
+            if ($config.disabled -or $config.installationState -cne 'installed') { throw 'installation-invalid' }
+            [void](Assert-AllenHelperPublisher $helper $config.publisherThumbprint)
             $key = Get-AllenPublicKey (Join-Path $helper 'public-key.json')
             if ($config.publicKeyFingerprint -cne $key.Fingerprint -or $config.installedVersion -isnot [string]) { throw 'installation-invalid' }
             [void](Get-AllenVersionParts $config.installedVersion)
         }
         return $config
-    } catch { throw 'installation-invalid' }
-}
-
-function Get-AllenMutexName($Config, [string]$Suffix = '') {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $hash = Get-AllenHexHash ([Text.Encoding]::UTF8.GetBytes($identity + '|' + $Config.helperDirectory.ToLowerInvariant()))
-    return 'Local\ALLENToolbox-' + $hash.Substring(0, 32) + $Suffix
+    } catch {
+        if ($_.Exception.Message -eq 'signature-invalid') { throw 'signature-invalid' }
+        throw 'installation-invalid'
+    }
 }
 
 function New-AllenState {
     return [pscustomobject][ordered]@{
-        protocol = 1; installed = $true; installedVersion = $null; availableVersion = $null
+        protocol = 2; installed = $true; installedVersion = $null; availableVersion = $null
         state = 'up-to-date'; lastCheckedAt = [long]0; lastUpdatedAt = [long]0; error = ''; extensionId = ''
+        security = [pscustomobject]@{ authenticode = $false; publisherThumbprint = '' }
     }
 }
 
@@ -234,31 +342,38 @@ function Read-AllenState($Config) {
         } catch { $state.state = 'error'; $state.error = 'installation-invalid' }
     }
     $state.extensionId = $Config.extensionId
+    $state.security = [pscustomobject]@{ authenticode = $true; publisherThumbprint = $Config.publisherThumbprint }
     return $state
 }
 
-function Write-AllenActivity($Config, [bool]$IsBusy) {
-    $mutex = New-Object Threading.Mutex($false, (Get-AllenMutexName $Config '-activity'))
-    $held = $false
+function Write-AllenActivity($Config, [bool]$IsBusy, [string]$Id) {
+    Assert-AllenClientId $Id
+    $directory = Join-Path (Get-AllenControlledRoot) 'activity'
+    Assert-AllenOwnedPath $directory -Directory
+    $lock = Enter-AllenLock $Config ('activity-' + $Id) 1000
     try {
-        try { $held = $mutex.WaitOne(1000) } catch [Threading.AbandonedMutexException] { $held = $true }
-        if (-not $held) { throw 'update-in-progress' }
-        Write-AllenJsonAtomic (Join-Path $Config.helperDirectory 'activity.json') ([pscustomobject]@{ protocol = 1; busy = $IsBusy; at = (Get-AllenTime) })
-    } finally { if ($held) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+        Write-AllenJsonAtomic (Join-Path $directory ($Id + '.json')) ([pscustomobject]@{ protocol = 2; clientId = $Id; busy = $IsBusy; at = (Get-AllenTime) })
+    } finally { $lock.Dispose() }
 }
 
 function Get-AllenDeferReason($Config, [bool]$IsBusy, [bool]$IsScheduled) {
     if ($IsBusy) { return 'active-downloads' }
-    if ($IsScheduled -and @(Get-Process -Name chrome, msedge, brave, chromium -ErrorAction SilentlyContinue).Count) { return 'browser-running' }
-    $path = Join-Path $Config.helperDirectory 'activity.json'
-    if ([IO.File]::Exists($path)) {
-        try {
+    # Browser/profile activity cannot be proven idle from one client's heartbeat.
+    if (@(Get-Process -Name chrome, msedge, brave, chromium -ErrorAction SilentlyContinue).Count) { return 'browser-running' }
+    try {
+        $directory = Join-Path (Get-AllenControlledRoot) 'activity'
+        Assert-AllenOwnedPath $directory -Directory
+        $paths = @([IO.Directory]::EnumerateFiles($directory, '*.json'))
+        if ($paths.Count -gt 256) { return 'active-downloads' }
+        foreach ($path in $paths) {
+            $id = [IO.Path]::GetFileNameWithoutExtension($path)
+            Assert-AllenClientId $id
             $activity = Read-AllenJson $path 4KB
+            if ($activity.protocol -isnot [int] -or $activity.protocol -ne 2 -or $activity.clientId -cne $id -or $activity.busy -isnot [bool] -or ($activity.at -isnot [long] -and $activity.at -isnot [int]) -or $activity.at -lt 0) { return 'active-downloads' }
             $age = (Get-AllenTime) - [long]$activity.at
-            if ($activity.protocol -ne 1 -or $activity.busy -isnot [bool] -or $age -lt 0) { return 'active-downloads' }
-            if ($activity.busy -and $age -le 120000) { return 'active-downloads' }
-        } catch { return 'active-downloads' }
-    }
+            if ($age -lt 0 -or ($activity.busy -and $age -le $script:AllenActivityLifetime)) { return 'active-downloads' }
+        }
+    } catch { return 'active-downloads' }
     return ''
 }
 
@@ -389,7 +504,7 @@ function Get-AllenArchivePath([string]$Path, [long]$ExternalAttributes = 0) {
     }
     if ($parts[0] -ceq 'updater') {
         if ($parts.Count -eq 1 -and $directory) { return [pscustomobject]@{ Path = $clean; Directory = $true; Root = 'helper'; Relative = '' } }
-        if ($parts.Count -ne 2 -or $directory -or $parts[1] -cnotin $script:AllenHelperFiles) { throw 'archive-invalid' }
+        if ($parts.Count -ne 2 -or $directory -or $parts[1] -cnotin ($script:AllenHelperFiles + @('availability.json'))) { throw 'archive-invalid' }
         return [pscustomobject]@{ Path = $clean; Directory = $false; Root = 'helper'; Relative = $parts[1] }
     }
     if ($clean -ceq 'Install-ALLEN-Toolbox.cmd' -and -not $directory) { return [pscustomobject]@{ Path = $clean; Directory = $false; Root = 'launcher'; Relative = $clean } }
@@ -577,8 +692,28 @@ function Test-AllenExtension([string]$Directory, [string]$ExpectedVersion = '') 
     return $manifest
 }
 
-function Test-AllenHelperStage($Config, [string]$Directory) {
+function Assert-AllenAvailability([string]$Directory, [string]$Thumbprint, [string]$LauncherPath = '') {
+    $path = Join-Path $Directory 'availability.json'
+    if (-not [IO.File]::Exists($path)) { return }
+    $metadata = Read-AllenJson $path 16KB
+    if (@($metadata.PSObject.Properties.Name).Count -ne 5 -or $metadata.protocol -isnot [int] -or $metadata.protocol -ne 2 -or $metadata.available -isnot [bool] -or -not $metadata.available -or $metadata.reason -cne '' -or $metadata.publisherThumbprint -cne $Thumbprint) { throw 'signature-invalid' }
+    $names = @('Install-ALLEN-Toolbox.cmd', 'updater/install.ps1', 'updater/updater.ps1', 'updater/public-key.json', 'updater/ALLEN-Toolbox-NativeHost.exe')
+    if (@($metadata.files.PSObject.Properties.Name).Count -ne $names.Count) { throw 'package-invalid' }
+    foreach ($name in $names) {
+        $hash = $metadata.files.$name
+        if ($hash -isnot [string] -or $hash -cnotmatch '^[a-f0-9]{64}$') { throw 'package-invalid' }
+        if ($name -ceq 'Install-ALLEN-Toolbox.cmd') {
+            $file = $LauncherPath
+            if (-not $file) { $file = Join-Path $Directory $name }
+        } else { $file = Join-Path $Directory ($name.Substring(8)) }
+        if ((Get-AllenHexHash (Read-AllenBytes $file 2MB)) -cne $hash) { throw 'package-invalid' }
+    }
+}
+
+function Test-AllenHelperStage($Config, [string]$Directory, [string]$LauncherPath = '') {
     foreach ($file in $script:AllenHelperFiles) { [void](Read-AllenBytes (Join-Path $Directory $file) 2MB) }
+    [void](Assert-AllenHelperPublisher $Directory $Config.publisherThumbprint)
+    Assert-AllenAvailability $Directory $Config.publisherThumbprint $LauncherPath
     $key = Get-AllenPublicKey (Join-Path $Directory 'public-key.json')
     if ($key.Fingerprint -cne $Config.publicKeyFingerprint) { throw 'signature-invalid' }
     foreach ($file in @('updater.ps1', 'install.ps1')) {
@@ -587,7 +722,7 @@ function Test-AllenHelperStage($Config, [string]$Directory) {
         if ($errors.Count) { throw 'package-invalid' }
         if ($file -eq 'updater.ps1') {
             $parameters = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-            foreach ($parameter in @('Command', 'Busy', 'Native', 'Scheduled')) { if ($parameter -notin $parameters) { throw 'package-invalid' } }
+            foreach ($parameter in @('Command', 'Busy', 'Native', 'Scheduled', 'ClientId', 'ActivityRecorded')) { if ($parameter -notin $parameters) { throw 'package-invalid' } }
         }
     }
 }
@@ -606,10 +741,22 @@ function Remove-AllenStage([string]$Path) {
     if ([IO.Directory]::Exists($Path)) { Assert-AllenNoReparse $Path -Recurse; [IO.Directory]::Delete($Path, $true) }
 }
 
-function Restore-AllenTransaction($Config, $Journal) {
+function Restore-AllenTransaction($Config, $Journal, [bool]$IsBusy = $false) {
+    if (Get-AllenDeferReason $Config $IsBusy $true) { throw 'transaction-recovery-required' }
     $paths = Get-AllenTransactionPaths $Config $Journal.token
     try {
-        foreach ($file in @('updater.ps1', 'install.ps1', 'native-host.cs', 'installation.json')) {
+        foreach ($owned in @($paths.ExtensionStage, $paths.ExtensionBackup, $paths.HelperStage)) { Assert-AllenNoReparse $owned -Recurse }
+        # Authenticate every rollback script before replacing even the first helper file.
+        foreach ($file in $script:AllenMutableHelperFiles) {
+            $backup = Join-Path (Join-Path $paths.HelperStage 'backup') $file
+            if ([IO.File]::Exists($backup)) { [void](Get-AllenCodeSigningPublisher $backup $Config.publisherThumbprint) }
+        }
+        $configBackup = Join-Path (Join-Path $paths.HelperStage 'backup') 'installation.json'
+        if ([IO.File]::Exists($configBackup)) {
+            $saved = Read-AllenJson $configBackup 16KB
+            if ($saved.protocol -ne 2 -or $saved.helperDirectory -cne $Config.helperDirectory -or $saved.extensionDirectory -cne $Config.extensionDirectory -or $saved.publisherThumbprint -cne $Config.publisherThumbprint -or $saved.installationId -cne $Config.installationId -or $saved.repository -cne $script:AllenRepository -or $saved.installedVersion -cne $Journal.oldVersion) { throw 'transaction-recovery-required' }
+        }
+        foreach ($file in $script:AllenMutableHelperFiles + @('installation.json')) {
             $backup = Join-Path (Join-Path $paths.HelperStage 'backup') $file
             if ([IO.File]::Exists($backup)) { Write-AllenBytesAtomic (Join-Path $Config.helperDirectory $file) (Read-AllenBytes $backup 2MB) }
         }
@@ -628,16 +775,20 @@ function Restore-AllenTransaction($Config, $Journal) {
     } catch { throw 'transaction-recovery-required' }
 }
 
-function Repair-AllenTransaction($Config) {
+function Repair-AllenTransaction($Config, [bool]$IsBusy = $false) {
     $path = Join-Path $Config.helperDirectory 'transaction.json'
-    if (-not [IO.File]::Exists($path)) { return }
+    if (-not [IO.File]::Exists($path)) { return '' }
+    # Recovery is a folder mutation, including when invoked by a status request.
+    if (Get-AllenDeferReason $Config $IsBusy $true) { return 'recovery-deferred' }
     try {
         $journal = Read-AllenJson $path 16KB
-        if ($journal.protocol -ne 1 -or $journal.extensionDirectory -cne $Config.extensionDirectory -or $journal.phase -notin @('prepared', 'old-moved', 'extension-committed', 'committed')) { throw 'transaction-recovery-required' }
+        if ($journal.protocol -isnot [int] -or $journal.protocol -ne 2 -or $journal.extensionDirectory -cne $Config.extensionDirectory -or $journal.publisherThumbprint -cne $Config.publisherThumbprint -or $journal.installationId -cne $Config.installationId -or $journal.phase -notin @('prepared', 'old-moved', 'extension-committed', 'committed')) { throw 'transaction-recovery-required' }
         [void](Get-AllenVersionParts $journal.newVersion); [void](Get-AllenVersionParts $journal.oldVersion)
         $paths = Get-AllenTransactionPaths $Config $journal.token
         foreach ($owned in @($paths.ExtensionStage, $paths.ExtensionBackup, $paths.HelperStage)) { Assert-AllenNoReparse $owned -Recurse }
         if ($journal.phase -eq 'committed') {
+            [void](Assert-AllenHelperPublisher $Config.helperDirectory $Config.publisherThumbprint)
+            if (($journal.updatedAt -isnot [long] -and $journal.updatedAt -isnot [int]) -or $journal.updatedAt -le 0 -or $journal.updatedAt -gt (Get-AllenTime)) { throw 'transaction-recovery-required' }
             [void](Get-AllenManifest $Config.extensionDirectory $journal.newVersion)
             $state = Read-AllenState $Config
             $state.installedVersion = $journal.newVersion; $state.availableVersion = $null; $state.state = 'updated'; $state.error = ''
@@ -645,28 +796,39 @@ function Repair-AllenTransaction($Config) {
             Write-AllenJsonAtomic (Join-Path $Config.helperDirectory 'state.json') $state
             Remove-AllenStage $paths.ExtensionStage; Remove-AllenStage $paths.HelperStage
             [IO.File]::Delete($path)
-        } else { Restore-AllenTransaction $Config $journal }
+        } else { Restore-AllenTransaction $Config $journal $IsBusy }
     } catch { throw 'transaction-recovery-required' }
+    return ''
 }
 
-function Invoke-AllenApplyRelease($Config, [string]$Token, [string]$Version, [scriptblock]$BeforeCommit = $null) {
+function Invoke-AllenApplyRelease($Config, [string]$Token, [string]$Version, [scriptblock]$BeforeCommit = $null, [bool]$IsBusy = $false, [bool]$CheckBrowsers = $true) {
     $paths = Get-AllenTransactionPaths $Config $Token
     $journalPath = Join-Path $Config.helperDirectory 'transaction.json'
+    if ([IO.File]::Exists($journalPath)) { throw 'transaction-recovery-required' }
+    Test-AllenHelperStage $Config $paths.HelperStage
+    [void](Test-AllenExtension $paths.ExtensionStage $Version)
+    [void](Assert-AllenHelperPublisher $Config.helperDirectory $Config.publisherThumbprint)
+    $reason = Get-AllenDeferReason $Config $IsBusy $CheckBrowsers
+    if ($reason) { throw $reason }
     $old = Get-AllenManifest $Config.extensionDirectory
     if ((Compare-AllenVersions $Version $old.version) -le 0) { throw 'release-invalid' }
-    $journal = [pscustomobject]@{ protocol = 1; token = $Token; extensionDirectory = $Config.extensionDirectory; oldVersion = $old.version; newVersion = $Version; phase = 'prepared'; updatedAt = [long]0 }
+    $journal = [pscustomobject]@{ protocol = 2; token = $Token; installationId = $Config.installationId; publisherThumbprint = $Config.publisherThumbprint; extensionDirectory = $Config.extensionDirectory; oldVersion = $old.version; newVersion = $Version; phase = 'prepared'; updatedAt = [long]0 }
     $backup = Join-Path $paths.HelperStage 'backup'
     [void][IO.Directory]::CreateDirectory($backup)
-    foreach ($file in @('updater.ps1', 'install.ps1', 'native-host.cs', 'installation.json')) {
+    foreach ($file in $script:AllenMutableHelperFiles + @('installation.json')) {
         [IO.File]::Copy((Join-Path $Config.helperDirectory $file), (Join-Path $backup $file), $false)
     }
     Write-AllenJsonAtomic $journalPath $journal
     try {
+        $reason = Get-AllenDeferReason $Config $IsBusy $CheckBrowsers
+        if ($reason) { throw $reason }
         [IO.Directory]::Move($Config.extensionDirectory, $paths.ExtensionBackup)
         $journal.phase = 'old-moved'; Write-AllenJsonAtomic $journalPath $journal
         [IO.Directory]::Move($paths.ExtensionStage, $Config.extensionDirectory)
         $journal.phase = 'extension-committed'; Write-AllenJsonAtomic $journalPath $journal
-        foreach ($file in @('updater.ps1', 'install.ps1', 'native-host.cs')) {
+        [void](Assert-AllenHelperPublisher $paths.HelperStage $Config.publisherThumbprint)
+        foreach ($file in $script:AllenMutableHelperFiles) {
+            [void](Get-AllenCodeSigningPublisher (Join-Path $paths.HelperStage $file) $Config.publisherThumbprint)
             Write-AllenBytesAtomic (Join-Path $Config.helperDirectory $file) (Read-AllenBytes (Join-Path $paths.HelperStage $file) 2MB)
         }
         # The running native EXE and pinned public key are deliberately never replaced.
@@ -678,37 +840,47 @@ function Invoke-AllenApplyRelease($Config, [string]$Token, [string]$Version, [sc
         $journal.updatedAt = Get-AllenTime; $journal.phase = 'committed'
         Write-AllenJsonAtomic $journalPath $journal
     } catch {
-        Restore-AllenTransaction $Config $journal
+        Restore-AllenTransaction $Config $journal $IsBusy
         throw 'transaction-failed'
     }
     # Retain the previous extension directory, including any unexpected local files.
-    Repair-AllenTransaction $Config
+    [void](Repair-AllenTransaction $Config $IsBusy)
     return $journal.updatedAt
 }
 
 function Invoke-AllenUpdater(
     [ValidateSet('status', 'check', 'update')][string]$Action,
     [bool]$IsBusy = $false, [bool]$IsScheduled = $false, [bool]$IsNative = $false,
-    [string]$HelperDirectory = $script:AllenUpdaterDirectory
+    [string]$HelperDirectory = $script:AllenUpdaterDirectory, [string]$Id = '', [bool]$AlreadyRecorded = $false
 ) {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     $state = New-AllenState
-    $config = $null; $mutex = $null; $held = $false; $paths = $null
+    $config = $null; $lock = $null; $paths = $null
     try {
         $config = Get-AllenInstallation $HelperDirectory
         # Heartbeats must remain writable while a different process holds the update lock.
-        if ($IsNative) { Write-AllenActivity $config $IsBusy }
+        if ($IsNative) {
+            Assert-AllenClientId $Id
+            # The native reader already recorded this request; a delayed child must not
+            # overwrite a newer busy heartbeat from the same stdin/client.
+            if (-not $AlreadyRecorded) { Write-AllenActivity $config $IsBusy $Id }
+        }
         $state = Read-AllenState $config
-        $mutex = New-Object Threading.Mutex($false, (Get-AllenMutexName $config))
-        try { $held = $mutex.WaitOne(2000) } catch [Threading.AbandonedMutexException] { $held = $true }
-        if (-not $held) {
+        try { $lock = Enter-AllenLock $config } catch {
+            if ($_.Exception.Message -ne 'update-in-progress') { throw }
             try { $state.installedVersion = (Get-AllenManifest $config.extensionDirectory).version } catch { $state.installedVersion = $config.installedVersion }
             $state.state = 'deferred'; $state.error = 'update-in-progress'
             return $state
         }
         $config = Get-AllenInstallation $HelperDirectory
-        Repair-AllenTransaction $config
+        if ([IO.File]::Exists((Join-Path (Get-AllenControlledRoot) 'install-transaction.json'))) { $state.state = 'deferred'; $state.error = 'recovery-deferred'; $state.installedVersion = $config.installedVersion; return $state }
+        $recovery = Repair-AllenTransaction $config $IsBusy
+        if ($recovery) {
+            try { $state.installedVersion = (Get-AllenManifest $config.extensionDirectory).version } catch { $state.installedVersion = $config.installedVersion }
+            $state.state = 'deferred'; $state.error = $recovery
+            return $state
+        }
         $state = Read-AllenState $config
         $state.installedVersion = (Get-AllenManifest $config.extensionDirectory).version
         if ($state.availableVersion -and (Compare-AllenVersions $state.availableVersion $state.installedVersion) -le 0) { $state.availableVersion = $null; $state.state = 'up-to-date'; $state.error = '' }
@@ -742,7 +914,7 @@ function Invoke-AllenUpdater(
                 $reason = Get-AllenDeferReason $config $IsBusy ($IsScheduled -or -not $IsNative)
                 if ($reason) { $state.state = 'deferred'; $state.error = $reason }
                 else {
-                    $state.lastUpdatedAt = Invoke-AllenApplyRelease $config $token $release.Version
+                    $state.lastUpdatedAt = Invoke-AllenApplyRelease $config $token $release.Version $null $IsBusy ($IsScheduled -or -not $IsNative)
                     $state.installedVersion = (Get-AllenManifest $config.extensionDirectory $release.Version).version
                     $state.availableVersion = $null; $state.state = 'updated'
                 }
@@ -752,8 +924,9 @@ function Invoke-AllenUpdater(
     } catch {
         $code = $_.Exception.Message
         if ($code -notin $script:AllenErrorCodes) { $code = 'internal-error' }
+        if ($config -and [IO.File]::Exists((Join-Path $config.helperDirectory 'transaction.json'))) { $code = 'transaction-recovery-required' }
         $state.state = 'error'; $state.error = $code
-        if ($config -and $held) {
+        if ($config -and $lock -and $Action -ne 'status') {
             try { $state.installedVersion = (Get-AllenManifest $config.extensionDirectory).version } catch { $state.installedVersion = $null }
             try { Write-AllenJsonAtomic (Join-Path $config.helperDirectory 'state.json') $state } catch { }
         }
@@ -761,7 +934,7 @@ function Invoke-AllenUpdater(
         if ($paths -and $config -and -not [IO.File]::Exists((Join-Path $config.helperDirectory 'transaction.json'))) {
             try { Remove-AllenStage $paths.ExtensionStage; Remove-AllenStage $paths.HelperStage } catch { }
         }
-        if ($held) { $mutex.ReleaseMutex() }; if ($mutex) { $mutex.Dispose() }
+        if ($lock) { $lock.Dispose() }
     }
     return $state
 }
@@ -769,6 +942,6 @@ function Invoke-AllenUpdater(
 # Dot-sourcing exposes pure/testable functions and never invokes an update or installer.
 if ($MyInvocation.InvocationName -ne '.') {
     [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-    $reply = Invoke-AllenUpdater $Command ([bool]$Busy) ([bool]$Scheduled) ([bool]$Native)
+    $reply = Invoke-AllenUpdater $Command ([bool]$Busy) ([bool]$Scheduled) ([bool]$Native) $script:AllenUpdaterDirectory $ClientId ([bool]$ActivityRecorded)
     ConvertTo-Json -InputObject $reply -Depth 8 -Compress
 }

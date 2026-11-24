@@ -1,6 +1,7 @@
 import { readBody } from './download.js';
 import { OFFICIAL_REPOSITORY, githubRepository, githubRelease, versionParts, compareVersions } from './update-meta.js';
 import { initNativeUpdater } from './native-updater.js';
+import { WINDOWS_UPDATER_AVAILABLE, WINDOWS_UPDATER_PUBLISHER } from './native-updater-config.js';
 export { OFFICIAL_REPOSITORY, githubRepository, githubRelease, versionParts, compareVersions } from './update-meta.js';
 
 export const UPDATE_ALARM = 'allen-toolbox-github-updates';
@@ -13,7 +14,7 @@ const HOUR = 60 * 60 * 1000;
 export function initUpdates({ chrome: browser = globalThis.chrome, fetch: request = globalThis.fetch,
   now = Date.now, timeout = 20000, acquireRequest, releaseRequest, busy = () => false, nativeUpdater } = {}) {
   const installedVersion = browser.runtime.getManifest().version;
-  const native = nativeUpdater || initNativeUpdater({ chrome: browser, busy });
+  const native = nativeUpdater || initNativeUpdater({ chrome: browser, busy, enabled: WINDOWS_UPDATER_AVAILABLE, publisherThumbprint: WINDOWS_UPDATER_PUBLISHER });
   let reloadTimer;
   const attemptReload = async () => {
     const result = await native.status();
@@ -133,7 +134,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
         if (generation === revision) await store({ ...record, metadata, etag, error, retryAt, checkedAt: now() });
       });
       const result = status();
-      const nativeStatus = await native.refresh();
+      const nativeStatus = await native.refresh({ force });
       if (generation === revision && !error && record.automatic && result.available && nativeStatus.installed) {
         const installed = await native.update();
         if (installed.requiresReload || installed.uncertain) { reloadLater(); return { ...status(), native: installed, checking: false }; }

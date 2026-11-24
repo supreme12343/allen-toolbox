@@ -16,6 +16,16 @@ const sources = Object.fromEntries(await Promise.all(['updater.ps1', 'install.ps
 const launcher = await readFile(new URL('../Install-ALLEN-Toolbox.cmd', import.meta.url), 'utf8');
 const psString = (value) => "'" + String(value).replaceAll("'", "''") + "'";
 const hash = (value) => createHash('sha256').update(value).digest('hex');
+const publisherThumbprint = 'A'.repeat(40);
+const clientId = '12345678-1234-4234-8234-123456789abc';
+const secondClientId = '87654321-4321-4321-8321-cba987654321';
+// Deliberately not a PE/executable. Signature APIs are mocked; this is never launched.
+const binaryBytes = Buffer.from('INERT SIGNED-BUNDLE FILE FIXTURE, NOT AN EXECUTABLE');
+const ownerSid = windows ? (() => {
+  const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8' });
+  assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout.trim(), /^S-1-/); return result.stdout.trim();
+})() : '';
 
 function extensionId(path) {
   const canonical = resolve(path).replace(/[\\/]+$/, '').replace(/^[a-z]:/, (drive) => drive.toUpperCase());
@@ -79,25 +89,37 @@ async function withFixture(work) {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = publicKey.export({ format: 'jwk' });
   const key = { algorithm: 'RSA-SHA256', modulus: Buffer.from(jwk.n, 'base64url').toString('base64'), exponent: Buffer.from(jwk.e, 'base64url').toString('base64') };
-  const temporaryBase = join(process.env.TEMP || process.env.TMP || '/tmp');
+  const temporaryBase = join(process.env.LOCALAPPDATA, 'Temp', 'kilo');
+  assert.ok(resolve(temporaryBase).toLowerCase().startsWith(resolve(process.env.USERPROFILE).toLowerCase() + '\\'), 'fixture root must stay under this Windows profile');
+  await mkdir(temporaryBase, { recursive: true });
   const directory = await mkdtemp(join(temporaryBase, 'native-updater-test-'));
-  const helper = join(directory, 'updater'), extension = join(directory, 'extension');
+  const controlledRoot = join(directory, 'ALLENToolbox'), helper = join(controlledRoot, 'updater'), extension = join(directory, 'extension');
+  const bundle = join(directory, 'bundle', 'updater');
   try {
-    await mkdir(helper); await mkdir(extension);
-    for (const [name, content] of Object.entries(sources)) await writeFile(join(helper, name), content);
-    await writeFile(join(helper, 'public-key.json'), JSON.stringify(key));
-    const config = { protocol: 1, owner: 'ALLEN Toolbox', repository, helperDirectory: helper, extensionDirectory: extension,
+    await mkdir(helper, { recursive: true }); await mkdir(extension); await mkdir(bundle, { recursive: true });
+    await mkdir(join(controlledRoot, 'locks')); await mkdir(join(controlledRoot, 'activity'));
+    const bundleFiles = { 'install.ps1': sources['install.ps1'], 'updater.ps1': sources['updater.ps1'], 'public-key.json': JSON.stringify(key), 'ALLEN-Toolbox-NativeHost.exe': binaryBytes };
+    for (const [name, content] of Object.entries(bundleFiles)) { await writeFile(join(helper, name), content); await writeFile(join(bundle, name), content); }
+    await writeFile(join(directory, 'managed-source.cs'), sources['native-host.cs']);
+    await writeFile(join(directory, 'bundle', 'Install-ALLEN-Toolbox.cmd'), launcher);
+    const availability = { protocol: 2, available: true, reason: '', publisherThumbprint, files: { 'Install-ALLEN-Toolbox.cmd': hash(launcher), ...Object.fromEntries(Object.entries(bundleFiles).map(([name, bytes]) => ['updater/' + name, hash(bytes)])) } };
+    await writeFile(join(bundle, 'availability.json'), JSON.stringify(availability));
+    const config = { protocol: 2, owner: 'ALLEN Toolbox', repository, helperDirectory: helper, extensionDirectory: extension,
       extensionId: extensionId(extension), publicKeyFingerprint: hash('RSA-SHA256\n' + key.modulus + '\n' + key.exponent),
-      installedVersion: '2.1.0', installedAt: Date.now(), taskName: 'ALLEN Toolbox Test-Not-Registered', disabled: false };
+      publisherThumbprint, installationId: '11111111-1111-4111-8111-111111111111', installationState: 'installed',
+      publisherTrust: { store: 'CurrentUser\\TrustedPublisher', introduced: false, retainedOnUninstall: true },
+      installedVersion: '2.1.0', installedAt: Date.now(), taskName: 'ALLEN Toolbox Updater-' + ownerSid, disabled: false };
     await writeFile(join(helper, 'installation.json'), JSON.stringify(config));
+    const ownership = { protocol: 2, owner: 'ALLEN Toolbox', userSid: ownerSid, helperDirectory: helper, installationId: config.installationId, publisherThumbprint };
+    await writeFile(join(helper, 'ownership.json'), JSON.stringify(ownership));
     for (const [name, content] of extensionFiles('2.1.0')) {
       const target = join(extension, name);
       await mkdir(resolve(target, '..'), { recursive: true }); await writeFile(target, content);
     }
     await writeFile(join(extension, 'local-notes.txt'), 'User fixture data must survive in the retained backup.');
     const entries = [...extensionFiles('2.2.0')].map(([path, data]) => ({ path: 'allen-toolbox/' + path, data }));
-    entries.push(...Object.entries(sources).map(([path, data]) => ({ path: 'updater/' + path, data })));
-    entries.push({ path: 'updater/public-key.json', data: JSON.stringify(key) }, { path: 'Install-ALLEN-Toolbox.cmd', data: launcher });
+    entries.push(...Object.entries(bundleFiles).map(([path, data]) => ({ path: 'updater/' + path, data })));
+    entries.push({ path: 'updater/availability.json', data: JSON.stringify(availability) }, { path: 'Install-ALLEN-Toolbox.cmd', data: launcher });
     const zip = rawZip(entries), signature = sign('sha256', zip, { key: privateKey, padding: constants.RSA_PKCS1_PADDING });
     await writeFile(join(helper, 'release.zip'), zip); await writeFile(join(helper, 'release.zip.sig'), signature);
     const filename = 'ALLEN-Toolbox-2.2.0.zip', tag = 'v2.2.0';
@@ -105,20 +127,52 @@ async function withFixture(work) {
       assets: [{ name: filename, size: zip.length, state: 'uploaded', browser_download_url: repository + '/releases/download/' + tag + '/' + filename },
         { name: filename + '.sig', size: signature.length, state: 'uploaded', browser_download_url: repository + '/releases/download/' + tag + '/' + filename + '.sig' }] };
     await writeFile(join(helper, 'metadata.json'), JSON.stringify(metadata));
-    await work({ directory, helper, extension, config, zip, signature, metadata, entries, key, privateKey });
+    await work({ directory, controlledRoot, helper, extension, bundle, config, zip, signature, metadata, entries, key, privateKey, availability });
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-function encodedArguments(code) {
-  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')];
+function powershellArguments(code) {
+  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'AllSigned', '-Command', code];
 }
 function prelude(fixture) {
   return `
     $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
-    . ${psString(join(root, 'updater', 'updater.ps1'))}
-    . ${psString(join(root, 'updater', 'install.ps1'))}
     $fixture = ${psString(fixture.directory)}; $helper = ${psString(fixture.helper)}; $extension = ${psString(fixture.extension)}
+    $bundle = ${psString(fixture.bundle)}; $env:LOCALAPPDATA = $fixture; $env:TEMP = $fixture; $env:TMP = $fixture
+    $usages = New-Object Security.Cryptography.OidCollection
+    [void]$usages.Add((New-Object Security.Cryptography.Oid '1.3.6.1.5.5.7.3.3'))
+    $eku = New-Object Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($usages, $false)
+    $script:fixtureCertificate = [pscustomobject]@{ Thumbprint = ${psString(publisherThumbprint)}; NotBefore = [DateTime]::UtcNow.AddDays(-1); NotAfter = [DateTime]::UtcNow.AddDays(1); Extensions = @($eku) }
+    $script:signatureStatus = 'Valid'; $script:foreignSignature = ''
+    function Get-AuthenticodeSignature($LiteralPath) {
+      if (-not $LiteralPath.StartsWith($fixture + '\\', [StringComparison]::OrdinalIgnoreCase)) { throw 'fixture signature path outside approved fixture' }
+      $certificate = $script:fixtureCertificate.PSObject.Copy()
+      if ($script:foreignSignature -and $LiteralPath.EndsWith($script:foreignSignature, [StringComparison]::OrdinalIgnoreCase)) { $certificate.Thumbprint = 'B' * 40 }
+      return [pscustomobject]@{ Status = $script:signatureStatus; SignerCertificate = $certificate }
+    }
+    # Dot-source parsed fixture functions, not unsigned script entrypoints. AllSigned stays active.
+    function Import-AllenFixtureFunctions([string]$Path, [bool]$Constants = $false) {
+      $tokens = $null; $errors = $null
+      $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+      if ($errors.Count) { throw ($errors | Out-String) }
+      foreach ($statement in $ast.EndBlock.Statements) {
+        if ($statement -is [Management.Automation.Language.FunctionDefinitionAst] -or ($Constants -and $statement -is [Management.Automation.Language.AssignmentStatementAst])) { . ([scriptblock]::Create($statement.Extent.Text)) }
+      }
+    }
+    . Import-AllenFixtureFunctions (Join-Path $bundle 'updater.ps1') $true
+    . Import-AllenFixtureFunctions (Join-Path $bundle 'install.ps1')
+    $script:AllenUpdaterDirectory = $helper; $script:AllenInstallerDirectory = $bundle
+    $script:AllenNativeHostName = 'com.supreme.allen_toolbox_updater_v2'
+    $script:AllenInstallerPublisher = Get-AllenInstallerPublisher $bundle
+    function Get-Process { return @() }
+    function Test-AllenPublisherTrusted { return $true }
+    function Assert-AllenInstallSlots { throw 'fixture unexpected registration query' }
+    function Register-AllenNativeHost { throw 'fixture unexpected registration mutation' }
+    function Unregister-AllenNativeHost { throw 'fixture unexpected registration mutation' }
+    function Register-AllenTask { throw 'fixture unexpected task mutation' }
+    function Unregister-AllenTask { throw 'fixture unexpected task mutation' }
     $config = Get-AllenInstallation $helper
+    $client = ${psString(clientId)}; $otherClient = ${psString(secondClientId)}
     function Assert-Case([bool]$Condition, [string]$Message) { if (-not $Condition) { throw ('fixture assertion: ' + $Message) } }
     function Reject-Case([scriptblock]$Work, [string]$Expected) {
       try { & $Work | Out-Null } catch { Assert-Case ($_.Exception.Message -eq $Expected) ('Expected ' + $Expected + ', got ' + $_.Exception.Message); return }
@@ -127,7 +181,7 @@ function prelude(fixture) {
   `;
 }
 function runPowerShell(fixture, code, { timeout = 30000 } = {}) {
-  const result = spawnSync(powershell, encodedArguments(prelude(fixture) + '\n' + code), { cwd: fixture.directory, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
+  const result = spawnSync(powershell, powershellArguments(prelude(fixture) + '\n' + code), { cwd: fixture.directory, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stdout + '\n' + result.stderr);
   return result.stdout.trim();
@@ -140,6 +194,31 @@ const mockRelease = `
     if ($Url -ceq $script:fixtureRelease.SignatureUrl) { return ,(Read-AllenBytes (Join-Path $helper 'release.zip.sig') 8KB) }
     throw 'fixture unexpected network URL'
   }
+`;
+const mockInstallation = `
+  $script:fixtureApproved = $false; $script:fixtureTrusted = $true
+  $script:fixtureNativeRegistrations = 0; $script:fixtureTaskRegistrations = 0; $script:fixturePublisherAdds = 0
+  function Request-AllenConsent { return $script:fixtureApproved }
+  function Assert-AllenInstallSlots { }
+  function Register-AllenNativeHost { Assert-Case $script:fixtureApproved 'registration needs explicit approval'; $script:fixtureNativeRegistrations++ }
+  function Register-AllenTask { Assert-Case $script:fixtureApproved 'task needs explicit approval'; $script:fixtureTaskRegistrations++ }
+  function Unregister-AllenNativeHost { Assert-Case $script:fixtureApproved 'unregister needs explicit approval' }
+  function Unregister-AllenTask { Assert-Case $script:fixtureApproved 'task removal needs explicit approval' }
+  function Test-AllenPublisherTrusted { return $script:fixtureTrusted }
+  function Add-AllenVerifiedPublisher {
+    Assert-Case $script:fixtureApproved 'publisher addition needs explicit approval'
+    $script:fixturePublisherAdds++; $script:fixtureTrusted = $true; return $true
+  }
+`;
+const prepareCrashJournal = `
+  $token = [Guid]::NewGuid().ToString('N'); $paths = Get-AllenTransactionPaths $config $token
+  [void][IO.Directory]::CreateDirectory($paths.ExtensionStage); [void][IO.Directory]::CreateDirectory($paths.HelperStage)
+  Expand-AllenVerifiedArchive (Read-AllenBytes (Join-Path $helper 'release.zip') 64MB) $paths.ExtensionStage $paths.HelperStage
+  [void][IO.Directory]::CreateDirectory((Join-Path $paths.HelperStage 'backup'))
+  foreach ($file in @('updater.ps1', 'install.ps1', 'installation.json')) { [IO.File]::Copy((Join-Path $helper $file), (Join-Path (Join-Path $paths.HelperStage 'backup') $file)) }
+  $journal = [pscustomobject]@{ protocol = 2; token = $token; installationId = $config.installationId; publisherThumbprint = $config.publisherThumbprint; extensionDirectory = $extension; oldVersion = '2.1.0'; newVersion = '2.2.0'; phase = 'old-moved'; updatedAt = 0 }
+  Write-AllenJsonAtomic (Join-Path $helper 'transaction.json') $journal
+  [IO.Directory]::Move($extension, $paths.ExtensionBackup)
 `;
 
 test('helper source fixes the repository, protocol, approval default and per-process policy', () => {
@@ -156,8 +235,12 @@ test('helper source fixes the repository, protocol, approval default and per-pro
   assert.match(sources['install.ps1'], /RepetitionInterval \(New-TimeSpan -Hours 1\)/);
   const parameterBlock = sources['install.ps1'].slice(0, sources['install.ps1'].indexOf('$script:AllenInstallerDirectory'));
   assert.doesNotMatch(parameterBlock, /\$(?:Silent|Yes|Force|NoConfirm|Accept|Elevate)\b/i);
-  assert.doesNotMatch(Object.values(sources).join('\n') + launcher, /Set-ExecutionPolicy|ExecutionPolicy\s+Unrestricted|Start-Process|runas|--load-extension|DeleteSubKeyTree|Chrome\\Preferences/i);
-  assert.match(launcher, /-NoLogo -NoProfile -ExecutionPolicy Bypass -File/);
+  assert.doesNotMatch(Object.values(sources).join('\n') + launcher, /Set-ExecutionPolicy|ExecutionPolicy\s+(Bypass|Unrestricted)|Start-Process|CreateNoWindow|runas|--load-extension|DeleteSubKeyTree|Chrome\\Preferences/i);
+  assert.doesNotMatch(sources['install.ps1'], /Compile-AllenNativeHost|CodeDom|GenerateExecutable|Add-Type -Path/);
+  assert.match(launcher, /-NoLogo -NoProfile -ExecutionPolicy AllSigned -File/);
+  assert.match(sources['install.ps1'], /com\.supreme\.allen_toolbox_updater_v2/);
+  assert.match(sources['native-host.cs'], /WinVerifyTrust/);
+  assert.ok(sources['install.ps1'].indexOf('$script:AllenInstallerPublisher = Get-AllenInstallerPublisher') < sources['install.ps1'].indexOf(". (Join-Path $PSScriptRoot 'updater.ps1')"));
 });
 
 test('dot-sourcing is inert and explicit console approval rejects Enter and lowercase answers', runtime, async () => withFixture(async (f) => {
@@ -202,7 +285,12 @@ test('Windows path IDs, Chrome numeric versions, profile boundaries and reparse 
     Assert-Case ((Compare-AllenVersions '2.1' '2.1.0') -eq 0) 'zero padding'
     Assert-Case ((Compare-AllenVersions '2.2.0' '2.1.65535') -gt 0) 'numeric order'
     foreach ($version in @('0', '0.0.0', '01.2', '1.65536', '1.2.3.4.5', '2.2.0-beta', '-1', '1..2', '1.0 ')) { Reject-Case { Get-AllenVersionParts $version } 'release-invalid' }
-    foreach ($path in @('C:\\Windows\\ALLENToolbox', $env:USERPROFILE, (Join-Path $env:USERPROFILE 'AppData\\Local\\Google\\Chrome\\User Data\\Default'), ${psString(junction)})) { Reject-Case { Assert-AllenUserDirectory $path } 'installation-invalid' }
+    foreach ($path in @('C:\\Windows\\ALLENToolbox', $env:USERPROFILE, (Join-Path $env:USERPROFILE 'AppData\\Local\\Google'), (Join-Path $env:USERPROFILE 'AppData\\Local\\Google\\Chrome'), (Join-Path $env:USERPROFILE 'AppData\\Local\\Google\\Chrome\\User Data'), (Join-Path $env:USERPROFILE 'AppData\\Local\\Google\\Chrome\\User Data\\Default'), (Join-Path $env:USERPROFILE 'AppData\\Local\\Microsoft'), (Join-Path $env:USERPROFILE 'AppData\\Local\\BraveSoftware'), ${psString(junction)})) { Reject-Case { Assert-AllenUserDirectory $path } 'installation-invalid' }
+    $manifestPath = Join-Path $extension 'manifest.json'; $manifestBytes = Read-AllenBytes $manifestPath
+    $manifest = Read-AllenJson $manifestPath; $manifest | Add-Member NoteProperty key 'manifest keys change the path-derived ID'
+    Write-AllenJsonAtomic $manifestPath $manifest
+    Reject-Case { Test-AllenExtension $extension } 'package-invalid'
+    Write-AllenBytesAtomic $manifestPath $manifestBytes
     [void](Test-AllenExtension $extension '2.1.0')
     [IO.File]::WriteAllText((Join-Path $extension 'background.js'), "import './shared/missing.js';")
     Reject-Case { Test-AllenExtension $extension } 'package-invalid'
@@ -298,7 +386,7 @@ test('source copy excludes development/private files and helper cleanup keeps un
     $config.disabled = $true
     Write-AllenJsonAtomic (Join-Path $helper 'installation.json') $config
     Reject-Case { Get-AllenInstallation $helper } 'installation-invalid'
-    $state = Invoke-AllenUpdater 'update' $false $false $true $helper
+    $state = Invoke-AllenUpdater 'update' $false $false $true $helper $client
     Assert-Case ($state.state -eq 'error' -and $state.error -eq 'installation-invalid') 'disabled helper cannot update'
     [IO.File]::Delete((Join-Path $helper 'public-key.json'))
     [void](Get-AllenInstallation -HelperDirectory $helper -ForUninstall)
@@ -306,7 +394,7 @@ test('source copy excludes development/private files and helper cleanup keeps un
     Remove-AllenOwnedHelper $config
     Assert-Case ([IO.File]::Exists((Join-Path $helper 'user-note.txt'))) 'unknown helper file preserved'
     Assert-Case ([IO.File]::Exists((Join-Path $extension 'local-notes.txt'))) 'extension data preserved'
-    Assert-Case (-not [IO.File]::Exists((Join-Path $helper 'installation.json'))) 'owned helper files removed'
+    Assert-Case ([IO.File]::Exists((Join-Path $helper 'ownership.json')) -and (Get-AllenInstallation $helper -ForUninstall).installationState -eq 'uninstalled') 'disabled ownership stays with unknown files for safe reinstall'
   `);
   assert.equal(await readFile(join(f.helper, 'user-note.txt'), 'utf8'), 'UNKNOWN_FILE_MUST_STAY');
 }));
@@ -348,14 +436,16 @@ test('signed hostile ZIPs fail preflight before extraction, including case alias
 test('busy and browser-running scheduled updates defer without networking or file replacement', runtime, async () => withFixture(async (f) => {
   runPowerShell(f, `
     function Get-AllenRelease { throw 'fixture network must not run' }
-    $state = Invoke-AllenUpdater 'update' $true $false $true $helper
+    $state = Invoke-AllenUpdater 'update' $true $false $true $helper $client
     Assert-Case ($state.state -eq 'deferred' -and $state.error -eq 'active-downloads' -and $state.installedVersion -eq '2.1.0') 'busy gate'
-    Write-AllenActivity $config $false
+    Write-AllenActivity $config $false $client
     function Get-Process { return [pscustomobject]@{ ProcessName = 'chrome' } }
     $state = Invoke-AllenUpdater 'update' $false $true $false $helper
     Assert-Case ($state.state -eq 'deferred' -and $state.error -eq 'browser-running') 'scheduled browser gate'
     $state = Invoke-AllenUpdater 'update' $false $false $false $helper
     Assert-Case ($state.state -eq 'deferred' -and $state.error -eq 'browser-running') 'non-native CLI is also conservative'
+    $state = Invoke-AllenUpdater 'update' $false $false $true $helper $client
+    Assert-Case ($state.state -eq 'deferred' -and $state.error -eq 'browser-running') 'native callers cannot bypass the all-browser safety gate'
     Assert-Case ((Get-AllenManifest $extension).version -eq '2.1.0') 'no replacement'
   `);
 }));
@@ -365,12 +455,12 @@ test('signed updates commit actual version, preserve path/ID/key/EXE and retain 
   await writeFile(executable, 'Fixed ABI executable sentinel');
   const keyBefore = await readFile(join(f.helper, 'public-key.json'));
   const output = runPowerShell(f, mockRelease + `
-    $state = Invoke-AllenUpdater 'update' $false $false $true $helper
+    $state = Invoke-AllenUpdater 'update' $false $false $true $helper $client
     Assert-Case ($state.state -eq 'updated' -and $state.installedVersion -eq '2.2.0' -and $null -eq $state.availableVersion -and $state.lastUpdatedAt -gt 0) ('actual commit: ' + ($state | ConvertTo-Json -Compress))
     Assert-Case ($state.extensionId -ceq $config.extensionId) 'same extension ID'
     Assert-Case ((Get-AllenManifest $extension).version -eq '2.2.0') 'installed manifest version'
     Assert-Case (-not [IO.File]::Exists((Join-Path $helper 'transaction.json'))) 'transaction finalized'
-    $status = Invoke-AllenUpdater 'status' $false $false $true $helper
+    $status = Invoke-AllenUpdater 'status' $false $false $true $helper $client
     Assert-Case ($status.installedVersion -eq '2.2.0' -and $status.lastUpdatedAt -eq $state.lastUpdatedAt) 'machine-readable atomic state'
     ConvertTo-Json -InputObject $state -Compress
   `, { timeout: 60000 });
@@ -390,10 +480,10 @@ test('late busy heartbeat defers a verified staged release and leaves the old in
     $script:originalFetch = ${'${function:Get-AllenHttpBytes}'}
     function Get-AllenHttpBytes($Url, $Limit, $TimeoutSeconds, $AssetUrl) {
       $bytes = & $script:originalFetch $Url $Limit $TimeoutSeconds $AssetUrl
-      Write-AllenActivity $config $true
+      Write-AllenActivity $config $true $otherClient
       return ,$bytes
     }
-    $state = Invoke-AllenUpdater 'update' $false $false $true $helper
+    $state = Invoke-AllenUpdater 'update' $false $false $true $helper $client
     Assert-Case ($state.state -eq 'deferred' -and $state.error -eq 'active-downloads' -and $state.availableVersion -eq '2.2.0') 'late heartbeat'
     Assert-Case ((Get-AllenManifest $extension).version -eq '2.1.0') 'old manifest intact'
     Assert-Case (-not @(Get-ChildItem -LiteralPath $fixture -Force | Where-Object Name -Like '.allen-toolbox-*').Count) 'no extension stage or backup left'
@@ -408,7 +498,7 @@ test('transaction failures roll back helpers, manifest and local user files; cra
     function Invoke-AllenApplyRelease($Config, $Token, $Version) {
       return & $script:originalApply $Config $Token $Version { throw 'fixture fail after helper replacement' }
     }
-    $state = Invoke-AllenUpdater 'update' $false $false $true $helper
+    $state = Invoke-AllenUpdater 'update' $false $false $true $helper $client
     Assert-Case ($state.state -eq 'error' -and $state.error -eq 'transaction-failed' -and $state.installedVersion -eq '2.1.0') ('rollback: ' + ($state | ConvertTo-Json -Compress))
     Assert-Case ([IO.File]::Exists((Join-Path $extension 'local-notes.txt'))) 'local user data restored'
     Assert-Case (-not [IO.File]::Exists((Join-Path $helper 'transaction.json'))) 'rollback finalized'
@@ -416,8 +506,8 @@ test('transaction failures roll back helpers, manifest and local user files; cra
     [void][IO.Directory]::CreateDirectory($paths.ExtensionStage); [void][IO.Directory]::CreateDirectory($paths.HelperStage)
     Expand-AllenVerifiedArchive (Read-AllenBytes (Join-Path $helper 'release.zip') 64MB) $paths.ExtensionStage $paths.HelperStage
     [void][IO.Directory]::CreateDirectory((Join-Path $paths.HelperStage 'backup'))
-    foreach ($file in @('updater.ps1','install.ps1','native-host.cs','installation.json')) { [IO.File]::Copy((Join-Path $helper $file), (Join-Path (Join-Path $paths.HelperStage 'backup') $file)) }
-    $journal = [pscustomobject]@{ protocol = 1; token = $token; extensionDirectory = $extension; oldVersion = '2.1.0'; newVersion = '2.2.0'; phase = 'extension-committed'; updatedAt = 0 }
+    foreach ($file in @('updater.ps1','install.ps1','installation.json')) { [IO.File]::Copy((Join-Path $helper $file), (Join-Path (Join-Path $paths.HelperStage 'backup') $file)) }
+    $journal = [pscustomobject]@{ protocol = 2; token = $token; installationId = $config.installationId; publisherThumbprint = $config.publisherThumbprint; extensionDirectory = $extension; oldVersion = '2.1.0'; newVersion = '2.2.0'; phase = 'extension-committed'; updatedAt = 0 }
     Write-AllenJsonAtomic (Join-Path $helper 'transaction.json') $journal
     [IO.Directory]::Move($extension, $paths.ExtensionBackup); [IO.Directory]::Move($paths.ExtensionStage, $extension)
     Repair-AllenTransaction $config
@@ -430,25 +520,25 @@ test('transaction failures roll back helpers, manifest and local user files; cra
   assert.deepEqual(await readFile(join(f.helper, 'updater.ps1')), before);
 }));
 
-test('cross-process mutex defers a second updater while native heartbeat remains writable', runtime, async () => withFixture(async (f) => {
+test('user-owned exclusive filesystem lock defers other sessions while client heartbeats stay writable', runtime, async () => withFixture(async (f) => {
   const code = prelude(f) + `
-    $mutex = New-Object Threading.Mutex($false, (Get-AllenMutexName $config)); [void]$mutex.WaitOne()
+    $lock = Enter-AllenLock $config
     [Console]::WriteLine('fixture-locked'); [Console]::Out.Flush(); [void][Console]::ReadLine()
-    $mutex.ReleaseMutex(); $mutex.Dispose()
+    $lock.Dispose()
   `;
-  const holder = spawn(powershell, encodedArguments(code), { cwd: f.directory, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  const holder = spawn(powershell, powershellArguments(code), { cwd: f.directory, stdio: ['pipe', 'pipe', 'pipe'] });
   try {
     await new Promise((resolveReady, reject) => {
-      const timer = setTimeout(() => reject(new Error('Mutex holder failed to start')), 10000);
+      const timer = setTimeout(() => reject(new Error('Filesystem lock holder failed to start')), 10000);
       let output = '';
       holder.stdout.on('data', (data) => { output += data; if (output.includes('fixture-locked')) { clearTimeout(timer); resolveReady(); } });
       holder.once('error', (error) => { clearTimeout(timer); reject(error); });
-      holder.once('exit', (code) => { clearTimeout(timer); reject(new Error('Mutex holder exited early: ' + code)); });
+      holder.once('exit', (code) => { clearTimeout(timer); reject(new Error('Filesystem lock holder exited early: ' + code)); });
     });
     runPowerShell(f, `
-      $state = Invoke-AllenUpdater 'status' $true $false $true $helper
+      $state = Invoke-AllenUpdater 'status' $true $false $true $helper $client
       Assert-Case ($state.state -eq 'deferred' -and $state.error -eq 'update-in-progress') 'cross-process lock'
-      $activity = Read-AllenJson (Join-Path $helper 'activity.json')
+      $activity = Read-AllenJson (Join-Path (Join-Path (Get-AllenControlledRoot) 'activity') ($client + '.json'))
       Assert-Case $activity.busy 'heartbeat must not block on update lock'
     `);
   } finally {
@@ -457,62 +547,274 @@ test('cross-process mutex defers a second updater while native heartbeat remains
   }
 }));
 
+test('unsigned, mismatched, non-CodeSigning and expired helpers fail closed before consent; metadata is not Authenticode', runtime, async () => withFixture(async (f) => {
+  runPowerShell(f, `
+    $script:consentCalls = 0
+    function Request-AllenConsent { $script:consentCalls++; return $false }
+    $script:signatureStatus = 'NotSigned'
+    Reject-Case { Get-AllenInstallerPublisher $bundle } 'signature-invalid'
+    Reject-Case { Invoke-AllenInstaller '' $extension $true } 'signature-invalid'
+    Reject-Case { Get-AllenInstallation $helper } 'signature-invalid'
+    $script:signatureStatus = 'Valid'
+    foreach ($file in @('updater.ps1', 'ALLEN-Toolbox-NativeHost.exe')) {
+      $script:foreignSignature = $file
+      Reject-Case { Get-AllenInstallerPublisher $bundle } 'signature-invalid'
+      Reject-Case { Invoke-AllenInstaller '' $extension $true } 'signature-invalid'
+    }
+    $script:foreignSignature = ''
+    $extensions = $script:fixtureCertificate.Extensions; $script:fixtureCertificate.Extensions = @()
+    Reject-Case { Get-AllenInstallerPublisher $bundle } 'signature-invalid'
+    $script:fixtureCertificate.Extensions = $extensions
+    $notAfter = $script:fixtureCertificate.NotAfter; $script:fixtureCertificate.NotAfter = [DateTime]::UtcNow.AddMinutes(-1)
+    Reject-Case { Get-AllenInstallerPublisher $bundle } 'signature-invalid'
+    $script:fixtureCertificate.NotAfter = $notAfter
+    Assert-Case ($script:consentCalls -eq 0) 'signature failure precedes installer consent'
+    Assert-Case (-not [IO.File]::Exists((Join-Path (Get-AllenControlledRoot) 'install-transaction.json'))) 'no install journal before consent'
+    Test-AllenHelperStage $config $bundle (Join-Path ([IO.Path]::GetDirectoryName($bundle)) 'Install-ALLEN-Toolbox.cmd')
+    $metadataPath = Join-Path $bundle 'availability.json'; $metadataBytes = Read-AllenBytes $metadataPath
+    $metadata = Read-AllenJson $metadataPath; $metadata.files.'updater/updater.ps1' = '0' * 64
+    Write-AllenJsonAtomic $metadataPath $metadata
+    Reject-Case { Test-AllenHelperStage $config $bundle (Join-Path ([IO.Path]::GetDirectoryName($bundle)) 'Install-ALLEN-Toolbox.cmd') } 'package-invalid'
+    Write-AllenBytesAtomic $metadataPath $metadataBytes
+    $metadata = Read-AllenJson $metadataPath; $metadata.available = $false; Write-AllenJsonAtomic $metadataPath $metadata
+    Reject-Case { Test-AllenHelperStage $config $bundle } 'signature-invalid'
+    Write-AllenBytesAtomic $metadataPath $metadataBytes
+    $original = Read-AllenBytes (Join-Path $helper 'installation.json')
+    $legacy = $config.PSObject.Copy(); $legacy.protocol = 1; Write-AllenJsonAtomic (Join-Path $helper 'installation.json') $legacy
+    Reject-Case { Get-AllenInstallation $helper } 'installation-invalid'
+    Write-AllenBytesAtomic (Join-Path $helper 'installation.json') $original
+    [IO.File]::Delete((Join-Path $bundle 'ALLEN-Toolbox-NativeHost.exe'))
+    Reject-Case { Get-AllenInstallerPublisher $bundle } 'signature-invalid'
+    Assert-Case ($script:consentCalls -eq 0) 'missing prebuilt binary cannot offer consent'
+  `);
+}));
+
+test('fresh busy clients aggregate for three minutes and delayed children cannot overwrite newer same-client heartbeats', runtime, async () => withFixture(async (f) => {
+  runPowerShell(f, `
+    $script:fixtureClock = Get-AllenTime
+    function Get-AllenTime { return $script:fixtureClock }
+    Write-AllenActivity $config $true $otherClient
+    Write-AllenActivity $config $false $client
+    Assert-Case ((Get-AllenDeferReason $config $false $false) -ceq 'active-downloads') 'idle client cannot clear another client'
+    function Get-AllenRelease { throw 'fixture network must not run' }
+    $state = Invoke-AllenUpdater 'update' $false $false $true $helper $client
+    Assert-Case ($state.error -ceq 'active-downloads' -and $state.state -ceq 'deferred') 'aggregate update gate'
+    Write-AllenActivity $config $true $client
+    $state = Invoke-AllenUpdater 'status' $false $false $true $helper $client $true
+    $activityPath = Join-Path (Join-Path (Get-AllenControlledRoot) 'activity') ($client + '.json')
+    Assert-Case (Read-AllenJson $activityPath).busy 'delayed child must not replace already-recorded newer busy heartbeat'
+    $script:fixtureClock += 180000
+    Assert-Case ((Get-AllenDeferReason $config $false $false) -ceq 'active-downloads') 'three-minute boundary remains busy'
+    $script:fixtureClock++
+    Assert-Case ((Get-AllenDeferReason $config $false $false) -ceq '') 'expired busy heartbeat'
+    foreach ($id in @('', $client.ToUpperInvariant(), 'not-a-uuid')) { Reject-Case { Write-AllenActivity $config $false $id } 'installation-invalid' }
+    $malformed = Read-AllenJson $activityPath; $malformed.at = -1; Write-AllenJsonAtomic $activityPath $malformed
+    Assert-Case ((Get-AllenDeferReason $config $false $false) -ceq 'active-downloads') 'malformed heartbeat fails closed'
+  `);
+}));
+
+test('status and direct crash recovery leave folders untouched while any client or browser is busy', runtime, async () => withFixture(async (f) => {
+  runPowerShell(f, prepareCrashJournal + `
+    Write-AllenActivity $config $true $otherClient
+    $before = Get-AllenHexHash (Read-AllenBytes (Join-Path $helper 'updater.ps1') 2MB)
+    $state = Invoke-AllenUpdater 'status' $false $false $true $helper $client
+    Assert-Case ($state.state -ceq 'deferred' -and $state.error -ceq 'recovery-deferred' -and $state.installedVersion -ceq '2.1.0') 'status reports deferred recovery'
+    Assert-Case ((Repair-AllenTransaction $config) -ceq 'recovery-deferred') 'direct repair enforces busy gate'
+    Assert-Case (-not [IO.Directory]::Exists($extension) -and [IO.Directory]::Exists($paths.ExtensionBackup) -and [IO.Directory]::Exists($paths.ExtensionStage)) 'no folder mutation before client idle'
+    Write-AllenActivity $config $false $otherClient
+    function Get-Process { return [pscustomobject]@{ ProcessName = 'chrome' } }
+    $state = Invoke-AllenUpdater 'status' $false $false $true $helper $client
+    Assert-Case ($state.error -ceq 'recovery-deferred' -and [IO.File]::Exists((Join-Path $helper 'transaction.json'))) 'even native status respects browser recovery gate'
+    Assert-Case ((Get-AllenHexHash (Read-AllenBytes (Join-Path $helper 'updater.ps1') 2MB)) -ceq $before) 'no helper rollback before idle'
+    function Get-Process { return @() }
+    $state = Invoke-AllenUpdater 'status' $false $false $true $helper $client
+    Assert-Case ($state.installedVersion -ceq '2.1.0' -and [IO.File]::Exists((Join-Path $extension 'local-notes.txt'))) 'idle status can recover the interrupted transaction'
+    Assert-Case (-not [IO.File]::Exists((Join-Path $helper 'transaction.json'))) 'recovery finalized only after idle'
+  `, { timeout: 60000 });
+}));
+
+test('mismatched rollback publisher preserves unresolved journal and never replaces even the first helper', runtime, async () => withFixture(async (f) => {
+  runPowerShell(f, prepareCrashJournal + `
+    [IO.Directory]::Move($paths.ExtensionStage, $extension)
+    $journal.phase = 'extension-committed'; Write-AllenJsonAtomic (Join-Path $helper 'transaction.json') $journal
+    $before = Get-AllenHexHash (Read-AllenBytes (Join-Path $helper 'updater.ps1') 2MB)
+    $script:foreignSignature = 'backup\\updater.ps1'
+    Reject-Case { Repair-AllenTransaction $config } 'transaction-recovery-required'
+    Assert-Case ([IO.File]::Exists((Join-Path $helper 'transaction.json')) -and [IO.Directory]::Exists($paths.ExtensionBackup)) 'mismatched backup remains recoverable'
+    Assert-Case ((Get-AllenManifest $extension).version -ceq '2.2.0') 'no unauthenticated rollback folder replacement'
+    Assert-Case ((Get-AllenHexHash (Read-AllenBytes (Join-Path $helper 'updater.ps1') 2MB)) -ceq $before) 'no first helper replacement'
+  `);
+}));
+
+test('interrupted owned helper reinstall resumes safely; uninstall and reattach preserve unknown files and shared publishers', runtime, async () => withFixture(async (f) => {
+  await writeFile(join(f.helper, 'unknown-user-file.txt'), 'KEEP UNKNOWN HELPER DATA');
+  runPowerShell(f, mockInstallation + `
+    $plan = Get-AllenInstallPlan '' $extension $true
+    Assert-Case ($plan.Reinstall -and $plan.Attach) 'owned reinstall is supported'
+    $result = Invoke-AllenInstaller '' $extension $true
+    Assert-Case $result.cancelled 'No is still the default during reinstall'
+    Assert-Case (-not [IO.File]::Exists((Join-Path (Get-AllenControlledRoot) 'install-transaction.json'))) 'no transaction before approval'
+    $script:fixtureApproved = $true
+    function Register-AllenTask { throw 'fixture install interruption' }
+    Reject-Case { Invoke-AllenInstaller '' $extension $true } 'fixture install interruption'
+    $incomplete = Get-AllenInstallation $helper -ForUninstall
+    Assert-Case ($incomplete.disabled -and $incomplete.installationState -ceq 'installing') 'interrupted helper is owned and disabled'
+    Assert-Case ([IO.File]::Exists((Join-Path (Get-AllenControlledRoot) 'install-transaction.json')) -and [IO.File]::Exists((Join-Path $helper 'ownership.json'))) 'early durable ownership and journal'
+    function Register-AllenTask { $script:fixtureTaskRegistrations++ }
+    $result = Invoke-AllenInstaller '' $extension $true
+    Assert-Case ($result.installed -and (Get-AllenInstallation $helper).installationState -ceq 'installed') 'signed retry resumes'
+    Assert-Case ([IO.File]::Exists((Join-Path $helper 'unknown-user-file.txt'))) 'reinstall preserves unknown helper files'
+    $result = Invoke-AllenInstaller '' '' $false $true
+    Assert-Case ($result.uninstalled -and (Get-AllenInstallation $helper -ForUninstall).disabled) 'uninstall leaves disabled ownership with unknown files'
+    Assert-Case ($script:fixturePublisherAdds -eq 0 -and [IO.File]::Exists((Join-Path $extension 'local-notes.txt'))) 'no shared certificate removal or browser/extension data removal'
+    $result = Invoke-AllenInstaller '' $extension $true
+    Assert-Case ($result.installed -and [IO.File]::Exists((Join-Path $helper 'unknown-user-file.txt'))) 'owned tombstone permits safe signed reattach'
+    [IO.File]::Delete((Join-Path $helper 'ownership.json'))
+    Reject-Case { Get-AllenInstallPlan '' $extension $true } 'installation-invalid'
+    Assert-Case ([IO.File]::Exists((Join-Path $helper 'unknown-user-file.txt'))) 'unowned directory is not deleted or adopted'
+  `, { timeout: 60000 });
+}));
+
+test('fresh partial install is recoverable and verified publisher leaf addition is consented and never a root install', runtime, async () => withFixture(async (f) => {
+  runPowerShell(f, mockInstallation + `
+    [IO.Directory]::Move($helper, (Join-Path (Get-AllenControlledRoot) 'prior-owned-fixture'))
+    $target = Join-Path $fixture 'fresh-extension'
+    $script:fixtureTrusted = $false
+    $plan = Get-AllenInstallPlan $extension $target
+    $text = Get-AllenConsentText $plan
+    Assert-Case ($plan.AddPublisher -and $text.Contains(${psString(publisherThumbprint)}) -and $text.Contains('CurrentUser\\TrustedPublisher')) 'leaf thumbprint and exact store are disclosed'
+    $cancel = Invoke-AllenInstaller $extension $target
+    Assert-Case ($cancel.cancelled -and $script:fixturePublisherAdds -eq 0 -and -not [IO.Directory]::Exists($helper)) 'no certificate/helper mutations before consent'
+    $script:fixtureApproved = $true
+    $script:originalCopy = ${'${function:Copy-AllenExtension}'}; $script:copyCrash = $true
+    function Copy-AllenExtension($Source, $Destination, [switch]$Resume) {
+      if ($script:copyCrash) { $script:copyCrash = $false; [IO.File]::Copy((Join-Path $Source 'manifest.json'), (Join-Path $Destination 'manifest.json')); throw 'fixture partial copy interruption' }
+      & $script:originalCopy $Source $Destination -Resume:$Resume
+    }
+    Reject-Case { Invoke-AllenInstaller $extension $target } 'fixture partial copy interruption'
+    $journal = Read-AllenInstallJournal (Get-AllenControlledRoot)
+    $incomplete = Get-AllenInstallation $helper -ForUninstall
+    Assert-Case ($journal.config.installationId -ceq $incomplete.installationId -and $incomplete.disabled) 'fresh interrupted helper has early ownership'
+    $retryPlan = Get-AllenInstallPlan $extension $target
+    $stages = Get-AllenInstallStagePaths $retryPlan $journal.token
+    [IO.File]::WriteAllText((Join-Path $stages.Extension 'unknown-during-interruption.txt'), 'KEEP PARTIAL STAGE USER FILE')
+    $result = Invoke-AllenInstaller $extension $target
+    Assert-Case ($result.installed -and (Get-AllenManifest $target).version -ceq '2.1.0') 'partial package copy resumes'
+    Assert-Case ([IO.File]::Exists((Join-Path $target 'unknown-during-interruption.txt'))) 'partial-stage unknown data is preserved'
+    Assert-Case ($script:fixturePublisherAdds -eq 1 -and (Get-AllenInstallation $helper).publisherTrust.introduced) 'verified leaf introduced only after explicit approval'
+    Assert-Case (-not [IO.File]::Exists((Join-Path (Get-AllenControlledRoot) 'install-transaction.json'))) 'fresh install finalized'
+    Assert-Case ($result.extensionId -ceq (Get-AllenExtensionId $target)) 'fresh path-derived extension ID'
+    Assert-Case ((Get-AllenTaskArguments (Get-AllenInstallation $helper)).Contains('-ExecutionPolicy AllSigned')) 'scheduled signed script uses AllSigned'
+  `, { timeout: 60000 });
+}));
+
 function frame(value) {
   const bytes = Buffer.isBuffer(value) ? value : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
   const header = Buffer.alloc(4); header.writeUInt32LE(bytes.length); return Buffer.concat([header, bytes]);
 }
-function nativeReplies(executable, input, args = []) {
-  const result = spawnSync(executable, args, { input, timeout: 20000, maxBuffer: 3 * 1024 * 1024, windowsHide: true });
-  assert.ifError(result.error); assert.equal(result.stderr.length, 0, result.stderr.toString());
-  const replies = [];
-  for (let offset = 0; offset < result.stdout.length;) {
-    assert.ok(offset + 4 <= result.stdout.length, 'complete output header');
-    const length = result.stdout.readUInt32LE(offset); offset += 4;
-    assert.ok(length > 0 && length <= 1024 * 1024 && offset + length <= result.stdout.length, 'bounded complete JSON frame');
-    replies.push(JSON.parse(result.stdout.subarray(offset, offset + length).toString('utf8'))); offset += length;
-  }
-  return replies;
-}
-function compileNative(f, sourceName = 'native-host.cs', executableName = 'ALLEN-Toolbox-NativeHost.exe') {
-  if (sourceName === 'native-host.cs' && executableName === 'ALLEN-Toolbox-NativeHost.exe') runPowerShell(f, 'Compile-AllenNativeHost $helper');
-  else runPowerShell(f, `Add-Type -Path (Join-Path $helper ${psString(sourceName)}) -OutputAssembly (Join-Path $helper ${psString(executableName)}) -OutputType ConsoleApplication -ReferencedAssemblies @('System.dll','System.Core.dll','System.Web.Extensions.dll')`);
-  return join(f.helper, executableName);
-}
-
-test('compiled native host frames multiple replies and rejects protocol, commands, paths, nonboolean busy and foreign callers', runtime, async () => withFixture(async (f) => {
-  const executable = compileNative(f), origin = 'chrome-extension://' + f.config.extensionId + '/';
-  const requests = [{ protocol: 1, command: 'status', busy: false }, { protocol: 1, command: 'update', busy: true },
-    { protocol: 2, command: 'status', busy: false }, { protocol: 1, command: 'status' }, { protocol: 1, command: 'status', busy: 'false' },
-    { protocol: 1, command: 'status', busy: false, path: 'C:\\Windows' }, { protocol: 1, command: 'exec', busy: false },
-    '{"protocol":1,"command":"update","command":"status","busy":false}',
-    '{"protocol":2,"\\u0070rotocol":1,"command":"status","busy":false}',
-    '{"protocol":1,"command":\'status\',"busy":false}', Buffer.from([0xff, 0xfe]), '{'];
-  const replies = nativeReplies(executable, Buffer.concat(requests.map(frame)), [origin]);
-  assert.equal(replies.length, requests.length);
-  assert.equal(replies[0].installedVersion, '2.1.0'); assert.equal(replies[0].protocol, 1); assert.equal(replies[0].extensionId, f.config.extensionId);
-  assert.equal(replies[1].state, 'deferred'); assert.equal(replies[1].error, 'active-downloads');
-  for (const reply of replies.slice(2)) { assert.equal(reply.state, 'error'); assert.equal(reply.error, 'native-input-invalid'); }
-  const foreign = nativeReplies(executable, frame(requests[0]), ['chrome-extension://' + 'a'.repeat(32) + '/']);
-  assert.equal(foreign[0].error, 'caller-not-allowed');
+test('in-memory managed library validates RPC2, required origins, framing and bounded streams without launching a process', runtime, async () => withFixture(async (f) => {
+  const valid = { protocol: 2, command: 'status', busy: false, clientId };
+  const invalid = [{ ...valid, protocol: 1 }, { ...valid, clientId: clientId.toUpperCase() }, { ...valid, clientId: '' },
+    { ...valid, busy: 'false' }, { ...valid, command: 'exec' }, { ...valid, path: 'C:\\Windows' },
+    { protocol: 2, command: 'status', busy: false },
+    '{"protocol":2,"command":"update","command":"status","busy":false,"clientId":"' + clientId + '"}',
+    '{"protocol":2,"command":\'status\',"busy":false,"clientId":"' + clientId + '"}',
+    '{"protocol":2,"\\u0063ommand":"status","busy":false,"clientId":"' + clientId + '"}'];
+  await writeFile(join(f.directory, 'requests.json'), JSON.stringify({ valid, invalid }));
+  await writeFile(join(f.directory, 'frame.bin'), frame(valid));
   const tooLarge = Buffer.alloc(4); tooLarge.writeUInt32LE(64 * 1024 + 1);
-  assert.equal(nativeReplies(executable, tooLarge, [origin])[0].error, 'native-input-invalid');
-  assert.equal(nativeReplies(executable, Buffer.from([1, 0]), [origin])[0].error, 'native-input-invalid');
-  assert.equal(JSON.parse(await readFile(join(f.extension, 'manifest.json'), 'utf8')).version, '2.1.0');
+  const badFrames = [tooLarge, Buffer.from([1, 0]), Buffer.from([0, 0, 0, 0]), Buffer.from([2, 0, 0, 0, 1])];
+  for (let i = 0; i < badFrames.length; i++) await writeFile(join(f.directory, 'bad-frame-' + i + '.bin'), badFrames[i]);
+  runPowerShell(f, `
+    Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $fixture 'managed-source.cs'))) -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Web.Extensions.dll') -ErrorAction Stop
+    $type = [AllenToolbox.NativeHost]; $flags = [Reflection.BindingFlags]'NonPublic, Static'
+    $type.GetField('extensionId', $flags).SetValue($null, $config.extensionId)
+    $json = New-Object Web.Script.Serialization.JavaScriptSerializer
+    function Invoke-Inert([string]$Name, [object[]]$Arguments) {
+      for ($i = 0; $i -lt $Arguments.Count; $i++) { if ($null -ne $Arguments[$i]) { $Arguments[$i] = $Arguments[$i].PSObject.BaseObject } }
+      return $type.GetMethod($Name, $flags).Invoke($null, $Arguments)
+    }
+    function Reject-Inert([scriptblock]$Work) {
+      try { & $Work | Out-Null } catch { $error = $_.Exception; while ($error.InnerException) { $error = $error.InnerException }; Assert-Case ($error -is [IO.InvalidDataException]) $error.Message; return }
+      throw 'fixture assertion: expected InvalidDataException'
+    }
+    $requests = Read-AllenJson (Join-Path $fixture 'requests.json')
+    $text = $requests.valid | ConvertTo-Json -Compress
+    Assert-Case (Invoke-Inert 'ValidRequest' @($json.DeserializeObject($text), $text)) 'valid RPC2'
+    foreach ($item in $requests.invalid) {
+      $text = if ($item -is [string]) { $item } else { $item | ConvertTo-Json -Compress }
+      try { $request = $json.DeserializeObject($text) } catch { $request = $null }
+      Assert-Case (-not (Invoke-Inert 'ValidRequest' @($request, $text))) 'invalid literal RPC2'
+    }
+    $origin = 'chrome-extension://' + $config.extensionId + '/'
+    Assert-Case (Invoke-Inert 'IsCallerAllowed' @(,[string[]]@($origin))) 'exact origin'
+    Assert-Case (Invoke-Inert 'IsCallerAllowed' @(,[string[]]@($origin, '--parent-window=0'))) 'origin plus Chromium parent'
+    foreach ($args in @(@(), @('--parent-window=1'), @($origin.TrimEnd('/')), @($origin.ToUpperInvariant()), @($origin, $origin), @($origin, '--parent-window=1', '--parent-window=2'), @($origin, '--parent-window=-1'))) {
+      Assert-Case (-not (Invoke-Inert 'IsCallerAllowed' @(,[string[]]$args))) 'missing/foreign/duplicate origin or parent rejected'
+    }
+    foreach ($path in @((Join-Path $env:USERPROFILE 'AppData\\Local\\Google'), (Join-Path $env:USERPROFILE 'AppData\\Local\\Google\\Chrome\\User Data\\Default'), (Join-Path $env:USERPROFILE 'AppData\\Local\\Microsoft'), (Join-Path $env:USERPROFILE 'AppData\\Local\\BraveSoftware'))) { Reject-Inert { Invoke-Inert 'UserDirectory' @($path) } }
+    $stream = New-Object IO.MemoryStream(,(Read-AllenBytes (Join-Path $fixture 'frame.bin')))
+    $bytes = Invoke-Inert 'ReadFrame' @($stream)
+    Assert-Case ($json.DeserializeObject([Text.Encoding]::UTF8.GetString($bytes))['clientId'] -ceq $client) 'round-trip bounded frame'
+    Assert-Case ($null -eq (Invoke-Inert 'ReadFrame' @($stream))) 'clean EOF'
+    for ($i = 0; $i -lt ${badFrames.length}; $i++) {
+      $stream = New-Object IO.MemoryStream(,(Read-AllenBytes (Join-Path $fixture ('bad-frame-' + $i + '.bin'))))
+      Reject-Inert { Invoke-Inert 'ReadFrame' @($stream) }
+    }
+    $stream = New-Object IO.MemoryStream(,([Text.Encoding]::UTF8.GetBytes('12345678')))
+    $bounded = Invoke-Inert 'ReadBoundedAsync' @($stream, 8)
+    Assert-Case ($bounded.GetAwaiter().GetResult().Length -eq 8) 'bounded managed stream'
+    $stream = New-Object IO.MemoryStream(,([Text.Encoding]::UTF8.GetBytes('123456789')))
+    $bounded = Invoke-Inert 'ReadBoundedAsync' @($stream, 8)
+    Reject-Inert { $bounded.GetAwaiter().GetResult() }
+    Assert-Case ($type.GetField('ProcessTimeoutMilliseconds', $flags).GetRawConstantValue() -eq 180000) 'finite child deadline is unchanged'
+  `, { timeout: 60000 });
 }));
 
-test('native subprocess output is bounded, timeout is finite and success must match the installed manifest', runtime, async () => withFixture(async (f) => {
-  const fixtureSource = sources['native-host.cs'].replace('private const int ProcessTimeoutMilliseconds = 180000;', 'private const int ProcessTimeoutMilliseconds = 2000;');
-  assert.notEqual(fixtureSource, sources['native-host.cs'], 'Only fixture deadline is shortened, not production code');
-  await writeFile(join(f.helper, 'native-host-fixture.cs'), fixtureSource);
-  const executable = compileNative(f, 'native-host-fixture.cs', 'NativeHost-Fixture.exe'), origin = 'chrome-extension://' + f.config.extensionId + '/';
-  const request = frame({ protocol: 1, command: 'check', busy: false });
-  const reply = { protocol: 1, installed: true, installedVersion: '9.9.9', availableVersion: null, state: 'updated', lastCheckedAt: 0, lastUpdatedAt: 0, error: '', extensionId: f.config.extensionId };
-  await writeFile(join(f.helper, 'updater.ps1'), `param([string]$Command,[switch]$Busy,[switch]$Native)\n[Console]::WriteLine(${psString(JSON.stringify(reply))})`);
-  assert.equal(nativeReplies(executable, request, [origin])[0].error, 'native-output-invalid');
-  await writeFile(join(f.helper, 'updater.ps1'), "param([string]$Command,[switch]$Busy,[switch]$Native)\n[Console]::Write(('x' * (1MB + 1)))\n");
-  assert.equal(nativeReplies(executable, request, [origin])[0].error, 'native-output-invalid');
-  await writeFile(join(f.helper, 'updater.ps1'), 'param([string]$Command,[switch]$Busy,[switch]$Native)\nStart-Sleep -Seconds 10\n');
-  const started = Date.now();
-  assert.equal(nativeReplies(executable, request, [origin])[0].error, 'native-timeout');
-  assert.ok(Date.now() - started < 8000, 'Native helper kills its timed-out child');
+test('same stdin transport accepts a validated busy heartbeat before a pending update completes, with ordered replies', runtime, async () => withFixture(async (f) => {
+  const input = Buffer.concat([frame({ protocol: 2, command: 'update', busy: false, clientId }), frame({ protocol: 2, command: 'status', busy: true, clientId })]);
+  await writeFile(join(f.directory, 'transport.bin'), input);
+  const harness = `
+namespace AllenFixture {
+  public sealed class ChunkedStream : System.IO.MemoryStream {
+    public ChunkedStream(byte[] bytes) : base(bytes) { }
+    public override int Read(byte[] buffer, int offset, int count) { return base.Read(buffer, offset, System.Math.Min(count, 2)); }
+  }
+  public static class InertTransport {
+    public static void Test(byte[] frames) {
+      var type = typeof(AllenToolbox.NativeHost);
+      var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+      var first = new System.Threading.Tasks.TaskCompletionSource<System.Collections.Generic.Dictionary<string, object>>();
+      bool heartbeatBeforeCompletion = false;
+      int calls = 0;
+      System.Func<System.Collections.Generic.Dictionary<string, object>, System.Threading.Tasks.Task<System.Collections.Generic.Dictionary<string, object>>> dispatch = request => {
+        calls++;
+        if ((string)request["command"] == "update") return first.Task;
+        heartbeatBeforeCompletion = !first.Task.IsCompleted && (bool)request["busy"] && (string)request["clientId"] == "${clientId}";
+        first.SetResult(new System.Collections.Generic.Dictionary<string, object> { { "sequence", 1 } });
+        return System.Threading.Tasks.Task.FromResult(new System.Collections.Generic.Dictionary<string, object> { { "sequence", 2 } });
+      };
+      System.Func<string, System.Collections.Generic.Dictionary<string, object>> error = code => new System.Collections.Generic.Dictionary<string, object> { { "error", code } };
+      using (var input = new ChunkedStream(frames))
+      using (var output = new System.IO.MemoryStream()) {
+        int exit = (int)type.GetMethod("ProcessFrames", flags).Invoke(null, new object[] { input, output, dispatch, error });
+        if (exit != 0 || calls != 2 || !heartbeatBeforeCompletion) throw new System.Exception("same-stdin heartbeat blocked behind update");
+        output.Position = 0;
+        var json = new System.Web.Script.Serialization.JavaScriptSerializer();
+        for (int index = 1; index <= 2; index++) {
+          byte[] reply = (byte[])type.GetMethod("ReadFrame", flags).Invoke(null, new object[] { output });
+          var value = (System.Collections.Generic.Dictionary<string, object>)json.DeserializeObject(System.Text.Encoding.UTF8.GetString(reply));
+          if ((int)value["sequence"] != index) throw new System.Exception("reply order changed");
+        }
+        if (type.GetMethod("ReadFrame", flags).Invoke(null, new object[] { output }) != null) throw new System.Exception("extra reply");
+      }
+    }
+  }
+}`;
+  await writeFile(join(f.directory, 'inert-transport.cs'), harness);
+  runPowerShell(f, `
+    $code = [IO.File]::ReadAllText((Join-Path $fixture 'managed-source.cs')) + [IO.File]::ReadAllText((Join-Path $fixture 'inert-transport.cs'))
+    Add-Type -TypeDefinition $code -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Web.Extensions.dll') -ErrorAction Stop
+    [AllenFixture.InertTransport]::Test((Read-AllenBytes (Join-Path $fixture 'transport.bin')))
+  `, { timeout: 60000 });
 }));

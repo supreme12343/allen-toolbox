@@ -311,7 +311,7 @@ test('capped ranges retain all bytes and release the real same-URL background le
   assert.ok(calls > 20); assert.equal(peak, 1); assert.equal(held, 0); assert.equal(bg.rules.size, 0);
 });
 
-test('capped responses still reject truncated bodies and partial files without a usable validator', async () => {
+test('capped responses still reject truncated bodies and servers that ignore every requested offset', async () => {
   let calls = 0;
   await assert.rejects(download.downloadFile('https://fixture.test/file', { tries: 2, retryDelay: 0, fetch: async (url, opts) => {
     calls++;
@@ -325,9 +325,184 @@ test('capped responses still reject truncated bodies and partial files without a
     await assert.rejects(download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
       requests.push(opts.headers.Range);
       return response(bytes('abcd'), { ...headers, 'content-range': 'bytes 0-3/12' }, 206);
-    } }), (e) => e.code === 'DOWNLOAD_RANGE' && /usable ETag or Last-Modified/.test(e.message));
-    assert.deepEqual(requests, [undefined, 'bytes=0-']);
+    } }), { code: 'DOWNLOAD_RANGE' });
+    assert.deepEqual(requests, [undefined, 'bytes=0-', 'bytes=3-11']);
   }
+});
+
+test('validatorless capped media uses serial byte-checked ranges and never sends a fabricated If-Range', async (t) => {
+  for (const headers of [{}, { etag: 'W/"v"' }, { etag: 'null', 'last-modified': 'unknown' }]) await t.test(JSON.stringify(headers), async () => {
+    const all = bytes('abcdefghijkl'), requests = [], progress = [];
+    const out = await download.downloadFile('https://fixture.test/file', { concurrency: 16, onProgress: (p) => progress.push(p), fetch: async (url, opts) => {
+      requests.push(opts.headers.Range); assert.equal(opts.headers['If-Range'], undefined);
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+      return response(all.slice(start, end + 1), { ...headers, 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+    } });
+    assert.equal(await out.blob.text(), 'abcdefghijkl'); assert.equal(out.verification, 'byte-continuity');
+    assert.deepEqual(requests, [undefined, 'bytes=0-', 'bytes=3-11', 'bytes=6-11', 'bytes=9-11', 'bytes=0-3']);
+    assert.ok(progress.every((p) => p.bytes <= all.length));
+  });
+});
+
+test('validatorless ranges adapt to smaller server caps and recheck the complete leading sample', async () => {
+  const all = bytes('abcdefghijklmnopqrstuvwxyz0123456789ABCD'), requests = [];
+  const out = await download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
+    requests.push(opts.headers.Range);
+    const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], cap = requests.length <= 2 ? 16 : 4;
+    const end = Math.min(m[2] ? +m[2] : all.length - 1, start + cap - 1);
+    return response(all.slice(start, end + 1), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  } });
+  assert.equal(await out.blob.text(), new TextDecoder().decode(all));
+  assert.ok(requests.includes('bytes=12-39')); assert.ok(requests.includes('bytes=14-39'));
+  assert.deepEqual(requests.slice(-4), ['bytes=0-15', 'bytes=4-15', 'bytes=8-15', 'bytes=12-15']);
+});
+
+test('validatorless continuation keeps the clean-retry headers and cannot restore cache conditionals', async () => {
+  const all = bytes('abcdefghijkl'), requests = [];
+  const out = await download.downloadFile('https://fixture.test/file', { headers: { 'If-None-Match': '"stale"', 'if-modified-since': 'Mon, 01 Jan 2024 00:00:00 GMT' }, fetch: async (url, opts) => {
+    requests.push(opts.headers);
+    if (requests.length > 1) for (const key of Object.keys(opts.headers)) assert.doesNotMatch(key, /^if-(none-match|modified-since|range)$/i);
+    const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+    return response(all.slice(start, end + 1), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  } });
+  assert.equal(await out.blob.text(), 'abcdefghijkl'); assert.ok(requests.length > 3);
+});
+
+test('validatorless large media rolls its overlap window and respects the 8 MiB continuation boundary', async () => {
+  const all = new Uint8Array(25 * 1024 * 1024 + 13).map((v, i) => i % 251), requests = [];
+  const out = await download.downloadFile('https://fixture.test/file', { concurrency: 16, fetch: async (url, opts) => {
+    requests.push(opts.headers.Range);
+    const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], cap = requests.length <= 2 ? 128 * 1024 : 4 * 1024 * 1024;
+    const end = Math.min(m[2] ? +m[2] : all.length - 1, start + cap - 1);
+    if (m[2]) assert.ok(+m[2] - start + 1 <= 8 * 1024 * 1024 + 64 * 1024);
+    return response(all.slice(start, end + 1), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  } });
+  assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
+  assert.equal(requests.at(-1), 'bytes=0-65535'); assert.ok(requests.length > 6);
+});
+
+test('validatorless media refuses mismatched overlap, changed totals/types and a changed final prefix', async (t) => {
+  for (const failure of ['overlap', 'total', 'type', 'final-prefix']) await t.test(failure, async () => {
+    const all = bytes('abcdefghijkl'); let calls = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { tries: 1, fetch: async (url, opts) => {
+      calls++;
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+      const body = all.slice(start, end + 1);
+      if (failure === 'overlap' && start > 0 || failure === 'final-prefix' && opts.headers.Range === 'bytes=0-3') body[0] ^= 1;
+      return response(body, { 'content-range': `bytes ${start}-${end}/${calls > 2 && failure === 'total' ? 13 : all.length}`,
+        ...(calls > 2 && failure === 'type' ? { 'content-type': 'video/webm' } : {}) }, 206);
+    } }), { code: 'DOWNLOAD_CHANGED' });
+    assert.ok(calls >= 3 && calls <= 6);
+  });
+});
+
+test('validatorless continuation still refuses wrong offsets, encodings, changed raw metadata and body overruns', async (t) => {
+  for (const failure of ['start', 'encoding', 'etag', 'body']) await t.test(failure, async () => {
+    const all = bytes('abcdefghijkl'); let calls = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { tries: 1, fetch: async (url, opts) => {
+      calls++;
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), offset = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, offset + 3);
+      const body = all.slice(offset, end + 1);
+      return response(calls > 2 && failure === 'body' ? new Uint8Array(body.length + 1) : body, {
+        'content-range': `bytes ${calls > 2 && failure === 'start' ? offset + 1 : offset}-${end}/${all.length}`,
+        ...(calls > 2 && failure === 'encoding' ? { 'content-encoding': 'gzip' } : {}),
+        etag: calls > 2 && failure === 'etag' ? 'W/"changed"' : 'W/"original"',
+      }, 206);
+    } }), { code: failure === 'etag' ? 'DOWNLOAD_CHANGED' : 'DOWNLOAD_RANGE' });
+    assert.equal(calls, 3);
+  });
+});
+
+test('a server ignoring later ranges replaces the whole download rather than appending a complete 200', async () => {
+  const all = bytes('abcdefghijkl'); let calls = 0;
+  const out = await download.downloadFile('https://fixture.test/file', { fetch: async () => {
+    calls++;
+    return calls < 3 ? response(all.slice(0, 4), { 'content-range': 'bytes 0-3/12' }, 206) : response(bytes('NEW_COMPLETE'), { 'content-length': '12' });
+  } });
+  assert.equal(await out.blob.text(), 'NEW_COMPLETE'); assert.equal(calls, 3);
+});
+
+test('complete-response replacement still respects terminal cancellation and declared file caps', async (t) => {
+  for (const when of ['progress', 'release']) await t.test('abort during ' + when, async () => {
+    const controller = new AbortController(); let calls = 0, leases = 0, released = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { signal: controller.signal,
+      context: { async acquire() { return ++leases; }, async release(id) { released++; if (when === 'release' && id === 3) controller.abort(); } },
+      onProgress: (p) => { if (when === 'progress' && p.bytes === 12) controller.abort(); }, fetch: async () => {
+        calls++; return calls < 3 ? response(bytes('abcd'), { 'content-range': 'bytes 0-3/12' }, 206) : response(bytes('NEW_COMPLETE'), { 'content-length': '12' });
+      } }), { name: 'AbortError' });
+    assert.equal(calls, 3); assert.equal(leases, released);
+  });
+  await t.test('oversized complete replacement never opens its body reader', async () => {
+    let calls = 0, opened = false;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { maxBytes: 12, fetch: async () => {
+      if (++calls < 3) return response(bytes('abcd'), { 'content-range': 'bytes 0-3/12' }, 206);
+      return { status: 200, ok: true, headers: new Headers({ 'content-type': 'video/mp4', 'content-length': '24' }), body: {
+        getReader() { opened = true; throw new Error('The oversized body must not be read'); }, cancel() { return Promise.resolve(); },
+      } };
+    } }), { code: 'DOWNLOAD_TOO_LARGE' });
+    assert.equal(opened, false); assert.equal(calls, 3);
+  });
+});
+
+test('a complete 200 during the final leading-sample recheck replaces rather than duplicates the assembly', async () => {
+  const all = bytes('abcdefghijkl'); let calls = 0;
+  const out = await download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
+    calls++;
+    if (opts.headers.Range === 'bytes=0-3') return response(bytes('NEW_COMPLETE'), { 'content-length': '12' });
+    const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+    return response(all.slice(start, end + 1), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  } });
+  assert.equal(await out.blob.text(), 'NEW_COMPLETE'); assert.equal(calls, 6);
+});
+
+test('validatorless range retries, cancellation and the request budget never emit a partial file', async (t) => {
+  await t.test('retry only the incomplete requested span', async () => {
+    const all = bytes('abcdefghijkl'), requests = []; let broken = false;
+    const out = await download.downloadFile('https://fixture.test/file', { tries: 2, retryDelay: 0, fetch: async (url, opts) => {
+      requests.push(opts.headers.Range);
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+      const body = all.slice(start, end + 1);
+      if (start === 3 && !broken) { broken = true; return response(body.slice(0, 2), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206); }
+      return response(body, { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+    } });
+    assert.equal(await out.blob.text(), 'abcdefghijkl'); assert.equal(requests.filter((r) => r === 'bytes=3-11').length, 2);
+  });
+  await t.test('cancel before the next span', async () => {
+    const all = bytes('abcdefghijkl'), controller = new AbortController(); let calls = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { signal: controller.signal, onProgress: (p) => { if (p.bytes >= 7) controller.abort(); }, fetch: async (url, opts) => {
+      calls++;
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+      return response(all.slice(start, end + 1), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+    } }), { name: 'AbortError' });
+    assert.equal(calls, 3);
+  });
+  await t.test('tiny responses have a finite budget', async () => {
+    let calls = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
+      calls++;
+      const start = Number(/^bytes=(\d+)-/.exec(opts.headers.Range || 'bytes=0-')[1]);
+      return response(bytes('xx'), { 'content-range': `bytes ${start}-${start + 1}/3000` }, 206);
+    } }), { code: 'DOWNLOAD_RANGE_LIMIT' });
+    assert.equal(calls, 1026);
+  });
+  await t.test('larger files scale the budget but cannot make unlimited tiny-range requests', async () => {
+    let calls = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
+      calls++;
+      const start = Number(/^bytes=(\d+)-/.exec(opts.headers.Range || 'bytes=0-')[1]);
+      return response(bytes('xx'), { 'content-range': `bytes ${start}-${start + 1}/${17 * 1024 * 1024}` }, 206);
+    } }), { code: 'DOWNLOAD_RANGE_LIMIT' });
+    assert.equal(calls, 17 * 64 + 2);
+  });
+  await t.test('the final-sample requests must fit the same budget before success is possible', async () => {
+    let calls = 0;
+    await assert.rejects(download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
+      calls++;
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : 2049, start + 2);
+      return response(new Uint8Array(end - start + 1).fill(120), { 'content-range': `bytes ${start}-${end}/2050` }, 206);
+    } }), { code: 'DOWNLOAD_RANGE_LIMIT' });
+    assert.equal(calls, 1026);
+  });
 });
 
 test('a later capped span with no progress, wrong offsets or changed identity discards every old piece', async (t) => {
@@ -453,7 +628,7 @@ test('capped HLS ranges enforce byte limits, cancellation and a finite request b
   });
 });
 
-test('invalid validators cannot authorize joining capped HTTP or HLS ranges', async (t) => {
+test('invalid validators cannot authorize If-Range or joining strict HLS ranges', async (t) => {
   for (const headers of [{ etag: 'null' }, { etag: 'not-an-etag' }, { etag: '"a", "b"' },
     { 'last-modified': 'unknown' }, { 'last-modified': '2024-01-01' }, { 'last-modified': 'Sat, 31 Feb 2024 00:00:00 GMT' },
     { etag: 'W/"v"', 'last-modified': 'unknown' }]) await t.test(JSON.stringify(headers), async () => {
@@ -464,9 +639,13 @@ test('invalid validators cannot authorize joining capped HTTP or HLS ranges', as
     };
     await assert.rejects(download.fetchBuffer('https://fixture.test/file', { range: { offset: 0, end: 8 }, fetch }), { code: 'DOWNLOAD_RANGE' });
     assert.equal(calls, 1);
-    calls = 0;
-    await assert.rejects(download.downloadFile('https://fixture.test/file', { fetch }), { code: 'DOWNLOAD_RANGE' });
-    assert.equal(calls, 2);
+    const all = bytes('abcdefgh'), requests = [];
+    const out = await download.downloadFile('https://fixture.test/file', { fetch: async (url, opts) => {
+      requests.push(opts.headers.Range); assert.equal(opts.headers['If-Range'], undefined);
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+      return response(all.slice(start, end + 1), { ...headers, 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+    } });
+    assert.equal(await out.blob.text(), 'abcdefgh'); assert.equal(out.verification, 'byte-continuity');
   });
 });
 

@@ -15,18 +15,19 @@ concurrency:
 jobs:
   native-windows:
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
       - name: Verify Windows updater without installing it
-        run: node --test tests/native-updater.test.mjs tests/native-bridge.test.mjs tests/update-signing.test.mjs
+        run: node --test tests/native-updater.test.mjs tests/native-bridge.test.mjs tests/update-signing.test.mjs tests/windows-security.test.mjs
   release:
-    runs-on: ubuntu-latest
+    needs: native-windows
+    runs-on: windows-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
@@ -36,11 +37,41 @@ jobs:
         run: npm run check
       - name: Run regression tests
         run: npm test
+      - name: Recover original artifacts for workflow retries
+        id: recovered
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tools/restore-release.mjs
+      - name: Build only a trusted code-signed Windows helper
+        if: steps.recovered.outputs.restored != 'true'
+        shell: powershell
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+          WINDOWS_SIGNING_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_THUMBPRINT }}
+        run: ./tools/build-windows-updater.ps1
       - name: Build linked release ZIP
+        if: steps.recovered.outputs.restored != 'true'
         env:
           UPDATER_SIGNING_KEY: ${{ secrets.UPDATER_SIGNING_KEY }}
+          WINDOWS_UPDATER_DIR: ${{ github.workspace }}/dist/windows-updater
         run: npm run release
+      - name: Scan release package with Microsoft Defender
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $protection = Get-MpComputerStatus
+          if (-not $protection.AntivirusEnabled -or -not $protection.RealTimeProtectionEnabled) { throw 'Defender protection must be enabled for release validation.' }
+          if ((Get-MpPreference).DisableArchiveScanning -ne $false) { throw 'Defender archive scanning must be enabled; no exclusions or preferences are changed.' }
+          $started = Get-Date
+          $version = (Get-Content -LiteralPath manifest.json -Raw | ConvertFrom-Json).version
+          $package = [IO.Path]::GetFullPath("dist/ALLEN-Toolbox-$version.zip")
+          Start-MpScan -ScanType CustomScan -ScanPath $package
+          $detected = @(Get-MpThreatDetection | Where-Object { $_.InitialDetectionTime -ge $started -and ($_.Resources -match [regex]::Escape($package)) })
+          if ($detected.Count -or -not (Test-Path -LiteralPath $package)) { throw 'Defender flagged the release package; publication is blocked.' }
       - name: Upload tested package
+        if: steps.recovered.outputs.restored != 'true'
         uses: actions/upload-artifact@v7.0.2
         with:
           name: allen-toolbox-package
@@ -51,4 +82,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           UPDATER_SIGNING_KEY: ${{ secrets.UPDATER_SIGNING_KEY }}
+          WINDOWS_UPDATER_DIR: ${{ github.workspace }}/dist/windows-updater
         run: node tools/publish-release.mjs

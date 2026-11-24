@@ -65,7 +65,7 @@ const server = createServer(async (request, response) => {
     const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || '');
     const headers = { 'Content-Type': 'video/webm', 'Accept-Ranges': 'bytes', ...(noValidatorVideo ? {} : { ETag: '"toolbox-fixture-v1"' }) };
     if (range) {
-      const start = Number(range[1]), end = Math.min(range[2] ? Number(range[2]) : video.length - 1, video.length - 1, partialVideo && !noValidatorVideo ? start + 128 * 1024 - 1 : video.length - 1);
+      const start = Number(range[1]), end = Math.min(range[2] ? Number(range[2]) : video.length - 1, video.length - 1, partialVideo ? start + 128 * 1024 - 1 : video.length - 1);
       if (start >= video.length || end < start) { response.writeHead(416, { 'Content-Range': 'bytes */' + video.length }); response.end(); return; }
       response.writeHead(206, { ...headers, 'Content-Range': 'bytes ' + start + '-' + end + '/' + video.length, 'Content-Length': end - start + 1 }); response.end(video.subarray(start, end + 1)); return;
     }
@@ -110,7 +110,9 @@ async function fixtureExtension() {
     if (path === 'background.js') {
       // Metadata is a local fixture too: never contact a real GitHub repository during tests.
       const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + '/releases/latest';
-      data = Buffer.from(`const fixtureFetch = globalThis.fetch;
+      data = Buffer.from(`globalThis.fixtureNativeCalls = 0;
+chrome.runtime.sendNativeMessage = () => { globalThis.fixtureNativeCalls++; return Promise.reject(new Error('Native execution is prohibited in this browser fixture')); };
+const fixtureFetch = globalThis.fetch;
 globalThis.fetch = (input, options) => String(input) === ${JSON.stringify(api)} ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(fixtureRelease))}, { headers: { 'content-type': 'application/json' } })) : fixtureFetch(input, options);
 ` + data.toString('utf8'));
     }
@@ -207,6 +209,12 @@ async function assertActionPopup(worker, inspector, source) {
       cdp.off('Target.receivedMessageFromTarget', receive);
       await cdp.send('Target.detachFromTarget', { sessionId }); await cdp.detach();
     }
+  } catch (error) {
+    const views = await inspector.evaluate(() => chrome.extension.getViews({ type: 'popup' }).map((view) => ({
+      width: view.innerWidth, height: view.innerHeight, bodyWidth: view.document.body?.getBoundingClientRect().width,
+      count: view.document.querySelector('#count')?.dataset.count, status: view.document.querySelector('#global-status')?.textContent,
+    }))).catch(() => []);
+    throw new Error(error.message + '\nNative popup diagnostics: ' + JSON.stringify(views), { cause: error });
   } finally {
     await inspector.evaluate(() => chrome.extension.getViews({ type: 'popup' }).forEach((view) => view.close()));
   }
@@ -289,6 +297,9 @@ try {
   await popup.emulateMedia({ reducedMotion: 'no-preference' });
   await popup.setViewportSize({ width: 448, height: 600 });
   await popup.goto(extensionOrigin + '/popup/popup.html?tab=' + tabId);
+  const runningVersion = await worker.evaluate(() => chrome.runtime.getManifest().version);
+  assert.equal(await popup.locator('#extension-version').textContent(), 'v' + runningVersion);
+  assert.equal(await popup.locator('#extension-version').getAttribute('aria-label'), 'Running extension version ' + runningVersion);
   await popup.locator('.card:has(.ico.pdf)').first().waitFor();
   await popup.locator('.card:has(.ico.media)').first().waitFor();
   await assertActionPopup(worker, popup, source);
@@ -329,6 +340,8 @@ try {
   assert.match(rejectedSource.error, /source is fixed/);
   const fixedSource = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'updates:get' }));
   assert.equal(fixedSource.repository, OFFICIAL_REPOSITORY);
+  assert.equal(await popup.locator('#update-install').isHidden(), true, 'An unsigned helper must not be offered for installation');
+  assert.match(await popup.locator('#native-updater-status').textContent(), /unavailable|No executable installer/);
   await popup.waitForFunction(() => document.getElementById('update-auto').getAttribute('aria-checked') === 'true');
   await popup.locator('#update-check').click();
   await popup.locator('#update-release').waitFor({ state: 'visible' });
@@ -336,6 +349,7 @@ try {
   assert.equal(await popup.locator('#update-download').isVisible(), true);
   const afterUpdates = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'us:bundle-export' }));
   assert.deepEqual(afterUpdates, beforeUpdates, 'GitHub checks must not replace saved userscripts');
+  assert.equal(await worker.evaluate(() => globalThis.fixtureNativeCalls), 0, 'Manual-only builds must not launch any native host');
   await popup.getByRole('switch', { name: 'Automatic update checks', exact: true }).click();
   await popup.waitForFunction(() => document.getElementById('update-auto').getAttribute('aria-checked') === 'false');
   assert.equal(await popup.locator('#update-check').isEnabled(), true, 'Manual checks stay available after automatic checks are disabled');
@@ -391,7 +405,14 @@ try {
     const fresh = requests.slice(before).find((request) => request.url === '/fixture.webm' && request.headers.range === 'bytes=0-');
     assert.ok(fresh, 'Range recovery must start again from byte zero: ' + scenario);
     assert.equal(fresh.headers['if-range'], undefined);
-    await popup.locator('.card:has(.ico.media) .status.ok').first().waitFor();
+    if (scenario === 'missing-validator') {
+      const spans = requests.slice(before).filter((request) => request.url === '/fixture.webm' && request.headers.range);
+      assert.ok(spans.some((request) => /^bytes=[1-9]\d*-/.test(request.headers.range)), 'Validatorless capped files must fetch their remaining bytes');
+      assert.ok(spans.every((request) => request.headers['if-range'] === undefined));
+      assert.ok(spans.some((request) => request.headers.range === 'bytes=0-65535'), 'Recheck the leading bytes before saving');
+    }
+    await popup.locator('.card:has(.ico.media) .status.' + (scenario === 'missing-validator' ? 'warn' : 'ok')).first().waitFor();
+    if (scenario === 'missing-validator') assert.match(await popup.locator('.card:has(.ico.media) .status.warn').first().textContent(), /Compatibility download/);
   }
   noValidatorVideo = false;
   for (const path of ['/ranges.m3u8', '/segments.m3u8']) {
@@ -443,6 +464,8 @@ try {
     await popup.setViewportSize({ width, height: 720 });
     await popup.goto(extensionOrigin + '/popup/popup.html?dashboard=1&tab=' + tabId + '&view=tools');
     await popup.locator('#tab-tools:not([hidden])').waitFor();
+    assert.equal(await popup.locator('#extension-version').isVisible(), true);
+    assert.equal(await popup.locator('#extension-version').textContent(), 'v' + runningVersion);
     assert.equal(await popup.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await assertCreditsVisible(popup);
     await assertTabIndicator(popup);
@@ -454,6 +477,7 @@ try {
   assert.equal(await popup.locator('#tabs').evaluate((nav) => getComputedStyle(nav, '::after').transitionDuration), '0s');
   await assertTabIndicator(popup);
   assert.equal(await popup.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  assert.equal(await popup.locator('#extension-version').isVisible(), true);
   assert.equal(await popup.locator('footer').evaluate((footer) => footer.getBoundingClientRect().bottom <= innerHeight), true);
   await assertCreditsVisible(popup);
   for (const button of await popup.locator('#tab-tools button:visible').all()) {

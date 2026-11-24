@@ -3,9 +3,17 @@ import { sourceUrl } from '../shared/usmeta.js';
 import { safeBase } from '../shared/names.js';
 import { cleanPageLink, matchesMediaFilter } from '../shared/utilities.js';
 import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { WINDOWS_UPDATER_AVAILABLE } from '../shared/native-updater-config.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+
+const runningVersion = chrome.runtime.getManifest().version;
+const versionBadge = $('#extension-version');
+versionBadge.textContent = 'v' + runningVersion;
+versionBadge.title = 'Running extension version ' + runningVersion;
+versionBadge.setAttribute('aria-label', versionBadge.title);
+versionBadge.hidden = false;
 
 let tabId = null;
 let state = null;
@@ -777,11 +785,12 @@ function renderUpdates(next) {
   $('#update-release').hidden = !next.available;
   $('#update-download').hidden = !next.available || !next.latest?.downloadUrl;
   const native = next.native;
-  $('#update-install').hidden = !native?.installed || (!next.available && !native.requiresReload);
+  $('#update-install').hidden = !WINDOWS_UPDATER_AVAILABLE || !native?.installed || (!next.available && !native.requiresReload);
   $('#update-install').disabled = !!native?.applying || next.checking || !!$('#update-install').dataset.busy;
   const nativeFeedback = $('#native-updater-status');
-  const nativeMessage = native?.uncertain ? 'Windows updater status is unresolved. Downloads wait for a safe status recheck.' : native?.installed ? native.error ? 'Windows updater: ' + native.error : native.applying ? 'Windows updater is verifying and installing the signed release...' :
-    'Windows updater installed. Folder version: ' + native.installedVersion + (native.requiresReload ? '. Extension reload is pending.' : '. Automatic installation is ready.') :
+  const nativeError = native?.error === 'browser-running' ? 'Automatic installation waits until all supported browsers are closed.' : native?.error;
+  const nativeMessage = !WINDOWS_UPDATER_AVAILABLE ? 'Automatic Windows installation is unavailable in this build. No executable installer is bundled; manual extension updates remain available.' : native?.uncertain ? 'Windows updater status is unresolved. Downloads wait for a safe status recheck.' : native?.installed ? nativeError ? 'Windows updater: ' + nativeError : native.applying ? 'Windows updater is verifying the signed release...' :
+    'Signed Windows updater installed. Folder version: ' + native.installedVersion + (native.requiresReload ? '. Extension reload is pending.' : '. Installation waits until supported browsers are closed.') :
     'Windows updater is not installed. Run the bundled installer once and approve its setup to enable automatic installation.';
   if (nativeFeedback.textContent !== nativeMessage) nativeFeedback.textContent = nativeMessage;
   const feedback = $('#update-status');
@@ -806,14 +815,14 @@ function wireUpdates() {
   wireAction($('#update-release'), () => chrome.tabs.create({ url: updateState.latest.url }));
   wireAction($('#update-download'), async () => {
     const result = await bg('updates:download');
-    status(result.filename + ' queued. The ZIP includes the optional installer; run it explicitly for one-time Windows updater setup.', 'ok');
+    status(result.filename + (WINDOWS_UPDATER_AVAILABLE ? ' queued. The ZIP includes the optional signed installer; approve its setup explicitly.' : ' queued. Extract to the original extension folder and reload it at chrome://extensions.'), 'ok');
   });
   wireAction($('#update-install'), async () => {
     $('#native-updater-status').textContent = 'Windows updater is verifying and installing the signed release...';
     const result = await bg('updates:install');
     renderUpdates({ ...updateState, native: result });
     if (result.state === 'error' || !result.installed) throw new Error(result.error || 'Windows updater is unavailable');
-    status(result.state === 'deferred' ? result.error : result.requiresReload ? 'Update installed; the extension is reloading.' : 'Windows updater check complete.', result.state === 'deferred' ? 'warn' : 'ok');
+    status(result.state === 'deferred' ? result.error === 'browser-running' ? 'Close all supported browsers; the signed scheduled updater can install when idle.' : result.error : result.requiresReload ? 'Update installed; the extension is reloading.' : 'Windows updater check complete.', result.state === 'deferred' ? 'warn' : 'ok');
   });
 }
 

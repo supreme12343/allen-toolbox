@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
+import { runInNewContext } from 'node:vm';
 import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const theme = await readFile(new URL('../popup/theme.css', import.meta.url), 'utf8');
@@ -41,6 +42,25 @@ test('popup and editor share local theme assets without skill content or remote 
   const packaging = await readFile(new URL('../shared/package.js', import.meta.url), 'utf8');
   assert.ok(packaging.includes("'popup/theme.css'"));
   assert.ok(!packaging.includes('.config/kilo'));
+});
+
+test('the persistent header shows the running manifest version before background requests start', async () => {
+  const html = await readFile(new URL('../popup/popup.html', import.meta.url), 'utf8');
+  assert.match(html.match(/<header>([\s\S]*?)<\/header>/)[1], /id="extension-version"/);
+  const js = await readFile(new URL('../popup/popup.js', import.meta.url), 'utf8');
+  const setup = js.slice(js.indexOf('const $ ='), js.indexOf('let tabId ='));
+  for (const version of ['2.2.0', '2.10.3', '65535.65535.65535.65535']) {
+    const badge = { hidden: true, setAttribute(name, value) { this[name] = value; } };
+    runInNewContext(setup, { chrome: { runtime: { getManifest: () => ({ version }) } }, document: { querySelector: (selector) => {
+      assert.equal(selector, '#extension-version'); return badge;
+    } } });
+    assert.equal(badge.textContent, 'v' + version);
+    assert.equal(badge['aria-label'], 'Running extension version ' + version);
+    assert.equal(badge.hidden, false);
+  }
+  const css = await readFile(new URL('../popup/popup.css', import.meta.url), 'utf8');
+  assert.match(css, /\.head-title\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(css, /\.pill\s*\{[^}]*white-space:\s*nowrap/);
 });
 
 test('the official update source is visible but has no URL entry or save controls', async () => {

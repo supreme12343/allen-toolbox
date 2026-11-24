@@ -103,7 +103,7 @@ async function main() {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('Publication runs only in the main-branch GitHub Actions workflow');
   const repository = githubRepository('https://github.com/' + process.env.GITHUB_REPOSITORY);
   if (!process.env.UPDATER_SIGNING_KEY) throw new Error('Signed updater publication requires UPDATER_SIGNING_KEY');
-  const release = await buildRelease({ repository, signingKey: process.env.UPDATER_SIGNING_KEY });
+  const release = await buildRelease({ repository, signingKey: process.env.UPDATER_SIGNING_KEY, nativeDirectory: process.env.WINDOWS_UPDATER_DIR || '' });
   const archive = await readFile(resolve(root, 'dist', release.filename));
   const checksum = await readFile(resolve(root, 'dist', release.filename + '.sha256'), 'utf8');
   const signature = await readFile(resolve(root, 'dist', release.filename + '.sig'));

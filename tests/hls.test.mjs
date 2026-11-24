@@ -34,7 +34,7 @@ async function workerHarness(fetch, send) {
   const ctx = vm.createContext({ ...hls, ...download, ...wrapped, ...pdf, ...names, TsAudioDemuxer,
     pdfjs: { GlobalWorkerOptions: {} }, chrome, self: { addEventListener() {} }, crypto: globalThis.crypto, URL: ObjectURL,
     Blob, Uint8Array, TextDecoder, AbortController, DOMException, setTimeout, clearTimeout, console });
-  new vm.Script(source + '\n globalThis.api = { runHls, startJob, jobs, hlsInfo, hlsPreview, handle };', { filename: 'offscreen.js' }).runInContext(ctx);
+  new vm.Script(source + '\n globalThis.api = { runHls, runHttp, startJob, jobs, hlsInfo, hlsPreview, handle };', { filename: 'offscreen.js' }).runInContext(ctx);
   return { api: ctx.api, messages, blobs, revoked, listeners };
 }
 
@@ -165,6 +165,41 @@ test('HLS ordinary segment URLs can return capped 206 responses without losing t
   const out = await run(worker);
   assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
   assert.deepEqual(requests, [undefined, 'bytes=64-187', 'bytes=128-187']);
+});
+
+test('ordinary HLS segment URLs also support validatorless capped responses without weakening playlist ranges', async () => {
+  const all = ts(), requests = [];
+  const worker = await workerHarness(async (url, opts) => {
+    if (url.endsWith('.m3u8')) return response(utf8(vod('#EXTINF:1,\nseg.ts')));
+    requests.push(opts.headers.Range); assert.equal(opts.headers['If-Range'], undefined);
+    const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 63);
+    return response(all.slice(start, end + 1), { 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  });
+  const out = await run(worker);
+  assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
+  assert.ok(requests.length > 3);
+});
+
+test('the HTTP worker creates output only after validatorless range checks and reports their limited assurance', async (t) => {
+  for (const changed of [false, true]) await t.test(changed ? 'mismatched overlap creates no saveable Blob' : 'complete checked media creates one Blob', async () => {
+    const all = utf8('abcdefghijkl');
+    const worker = await workerHarness(async (url, opts) => {
+      const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || 'bytes=0-'), start = +m[1], end = Math.min(m[2] ? +m[2] : all.length - 1, start + 3);
+      const data = all.slice(start, end + 1);
+      if (changed && start > 0) data[0] ^= 1;
+      return response(data, { 'content-range': `bytes ${start}-${end}/${all.length}`, 'content-type': 'video/mp4' }, 206);
+    });
+    const job = { id: 'http-fixture', abort: new AbortController(), state: 'running' };
+    const pending = worker.api.runHttp({ url: 'https://media.test/lecture.mp4', name: 'Lecture', context, concurrency: 16 }, job);
+    if (changed) { await assert.rejects(pending, { code: 'DOWNLOAD_CHANGED' }); assert.equal(worker.blobs.size, 0); }
+    else {
+      const out = await pending;
+      assert.equal(await worker.blobs.get(out.blobUrl).text(), 'abcdefghijkl');
+      assert.match(out.notice, /file-version identity could not be verified/); assert.equal(worker.blobs.size, 1);
+    }
+    assert.equal(worker.messages.filter((m) => m.type === 'off:request-acquire').length,
+      worker.messages.filter((m) => m.type === 'off:request-release').length);
+  });
 });
 
 test('HLS capped ranges reject changed entities and unvalidated prefixes without creating output', async (t) => {

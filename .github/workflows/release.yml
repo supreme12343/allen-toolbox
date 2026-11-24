@@ -61,6 +61,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          ./tools/prepare-ci-defender.ps1
           $protection = Get-MpComputerStatus
           if (-not $protection.AntivirusEnabled -or -not $protection.RealTimeProtectionEnabled) { throw 'Defender protection must be enabled for release validation.' }
           if ((Get-MpPreference).DisableArchiveScanning -ne $false) { throw 'Defender archive scanning must be enabled; no exclusions or preferences are changed.' }

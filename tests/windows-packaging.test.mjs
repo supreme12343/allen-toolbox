@@ -101,4 +101,11 @@ test('release workflow blocks on Windows checks and never disables security to p
   assert.doesNotMatch(workflow, /continue-on-error|DisableRealtimeMonitoring|Add-MpPreference|Set-MpPreference/);
   assert.match(workflow, /Start-MpScan -ScanType CustomScan/);
   assert.ok(workflow.indexOf('Scan release package') < workflow.indexOf('node tools/publish-release.mjs'));
+  const preparation = await readFile(new URL('../tools/prepare-ci-defender.ps1', import.meta.url), 'utf8');
+  assert.match(preparation, /GITHUB_ACTIONS -cne 'true'/);
+  assert.match(preparation, /RUNNER_ENVIRONMENT -cne 'github-hosted'/);
+  assert.match(preparation, /DisableRealtimeMonitoring \$false/);
+  assert.match(preparation, /DisableArchiveScanning \$false/);
+  assert.match(preparation, /Remove-MpPreference -ExclusionPath/);
+  assert.doesNotMatch(preparation, /DisableRealtimeMonitoring \$true|DisableArchiveScanning \$true|Add-MpPreference/);
 });

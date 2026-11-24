@@ -12,7 +12,7 @@ const api = 'https://api.github.com/repos/supreme12343/allen-toolbox/releases/la
 const windows = process.platform === 'win32';
 const powershell = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const runtime = { skip: windows ? false : 'Windows PowerShell 5.1/.NET Framework integration test' };
-const sources = Object.fromEntries(await Promise.all(['updater.ps1', 'install.ps1', 'native-host.cs'].map(async (name) => [name, await readFile(new URL('../updater/' + name, import.meta.url), 'utf8')])));
+const sources = Object.fromEntries(await Promise.all(['updater.ps1', 'install.ps1', 'native-host.cs'].map(async (name) => [name, (await readFile(new URL('../updater/' + name, import.meta.url), 'utf8')).replace(/\r\n/g, '\n')])));
 const launcher = await readFile(new URL('../Install-ALLEN-Toolbox.cmd', import.meta.url), 'utf8');
 const psString = (value) => "'" + String(value).replaceAll("'", "''") + "'";
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -127,6 +127,21 @@ async function withFixture(work) {
       assets: [{ name: filename, size: zip.length, state: 'uploaded', browser_download_url: repository + '/releases/download/' + tag + '/' + filename },
         { name: filename + '.sig', size: signature.length, state: 'uploaded', browser_download_url: repository + '/releases/download/' + tag + '/' + filename + '.sig' }] };
     await writeFile(join(helper, 'metadata.json'), JSON.stringify(metadata));
+    // Elevated runners default new objects to the Administrators owner. Fixtures
+    // explicitly model the per-user ownership enforced by the real installer.
+    const ownershipScript = `$ErrorActionPreference='Stop'; $root=${psString(directory)};
+if(-not $root.StartsWith($env:USERPROFILE+'\\',[StringComparison]::OrdinalIgnoreCase)){throw 'fixture ownership escaped its user profile'};
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
+$queue=New-Object 'Collections.Generic.Queue[string]'; $queue.Enqueue($root);
+while($queue.Count){$path=$queue.Dequeue();$attributes=[IO.File]::GetAttributes($path);
+if($attributes -band [IO.FileAttributes]::ReparsePoint){throw 'fixture ownership must not follow links'};
+if($attributes -band [IO.FileAttributes]::Directory){
+$security=New-Object Security.AccessControl.DirectorySecurity; $security.SetOwner($sid);$security.SetAccessRuleProtection($true,$false);
+$rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit',[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow);$security.AddAccessRule($rule);[IO.Directory]::SetAccessControl($path,$security);
+foreach($child in [IO.Directory]::EnumerateFileSystemEntries($path)){$queue.Enqueue($child)}
+}else{$security=New-Object Security.AccessControl.FileSecurity;$security.SetOwner($sid);$security.SetAccessRuleProtection($true,$false);$security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,[Security.AccessControl.FileSystemRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow)));[IO.File]::SetAccessControl($path,$security)}}`;
+    const ownershipResult = spawnSync(powershell, powershellArguments(ownershipScript), { encoding: 'utf8', timeout: 30000 });
+    assert.ifError(ownershipResult.error); assert.equal(ownershipResult.status, 0, ownershipResult.stderr);
     await work({ directory, controlledRoot, helper, extension, bundle, config, zip, signature, metadata, entries, key, privateKey, availability });
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
@@ -171,7 +186,14 @@ function prelude(fixture) {
     function Unregister-AllenNativeHost { throw 'fixture unexpected registration mutation' }
     function Register-AllenTask { throw 'fixture unexpected task mutation' }
     function Unregister-AllenTask { throw 'fixture unexpected task mutation' }
-    $config = Get-AllenInstallation $helper
+    try { $config = Get-AllenInstallation $helper } catch {
+      $record = Read-AllenJson (Join-Path $helper 'installation.json')
+      [Console]::Error.WriteLine((@{ fixture = $fixture; profile = $env:USERPROFILE; user = Get-AllenCurrentUserSid;
+        rootOwner = [IO.Directory]::GetAccessControl((Get-AllenControlledRoot)).GetOwner([Security.Principal.SecurityIdentifier]).Value;
+        helperOwner = [IO.Directory]::GetAccessControl($helper).GetOwner([Security.Principal.SecurityIdentifier]).Value;
+        protocolType = $record.protocol.GetType().FullName } | ConvertTo-Json -Compress))
+      throw
+    }
     $client = ${psString(clientId)}; $otherClient = ${psString(secondClientId)}
     function Assert-Case([bool]$Condition, [string]$Message) { if (-not $Condition) { throw ('fixture assertion: ' + $Message) } }
     function Reject-Case([scriptblock]$Work, [string]$Expected) {

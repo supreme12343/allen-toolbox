@@ -251,7 +251,7 @@ namespace AllenToolbox
             FileStream held = null;
             while (held == null)
             {
-                try { held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+                try { held = new FileStream(lockPath, FileMode.OpenOrCreate, FileSystemRights.Read | FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, UserFileSecurity()); }
                 catch (IOException) { if (clock.ElapsedMilliseconds >= 1000) throw new InvalidDataException(); Thread.Sleep(25); }
             }
             using (held)
@@ -263,12 +263,22 @@ namespace AllenToolbox
                 byte[] bytes;
                 lock (Json) { bytes = Utf8.GetBytes(Json.Serialize(new Dictionary<string, object> { { "protocol", 2 }, { "clientId", clientId }, { "busy", busy }, { "at", at } })); }
                 try {
-                    File.WriteAllBytes(temporary, bytes);
+                    using (FileStream file = new FileStream(temporary, FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, UserFileSecurity()))
+                    { file.Write(bytes, 0, bytes.Length); file.Flush(true); }
                     if (File.Exists(path)) File.Replace(temporary, path, null);
                     else File.Move(temporary, path);
                 }
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
+        }
+
+        private static FileSecurity UserFileSecurity()
+        {
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
+            FileSecurity security = new FileSecurity();
+            security.SetOwner(user); security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
+            return security;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

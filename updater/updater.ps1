@@ -127,6 +127,15 @@ function New-AllenOwnedDirectory([string]$Path) {
     Assert-AllenOwnedPath $Path -Directory
 }
 
+function New-AllenFileSecurity {
+    $sid = New-Object Security.Principal.SecurityIdentifier (Get-AllenCurrentUserSid)
+    $security = New-Object Security.AccessControl.FileSecurity
+    $security.SetOwner($sid)
+    $security.SetAccessRuleProtection($true, $false)
+    $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)))
+    return $security
+}
+
 function Enter-AllenLock($Config, [string]$Name = 'update', [int]$TimeoutMilliseconds = 2000) {
     if ($Name -cnotmatch '^(update|activity-[a-f0-9-]{36})$' -or $TimeoutMilliseconds -lt 0 -or $TimeoutMilliseconds -gt 2000) { throw 'installation-invalid' }
     $root = Get-AllenControlledRoot
@@ -140,7 +149,7 @@ function Enter-AllenLock($Config, [string]$Name = 'update', [int]$TimeoutMillise
         Assert-AllenNoReparse $path
         if ([IO.File]::Exists($path)) { Assert-AllenOwnedPath $path }
         try {
-            $lock = New-Object IO.FileStream($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $lock = New-Object IO.FileStream($path, [IO.FileMode]::OpenOrCreate, ([Security.AccessControl.FileSystemRights]::Read -bor [Security.AccessControl.FileSystemRights]::Write), [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AllenFileSecurity))
             try { Assert-AllenOwnedPath $path; return $lock } catch { $lock.Dispose(); throw }
         } catch [IO.IOException] {
             if ($clock.ElapsedMilliseconds -ge $TimeoutMilliseconds) { throw 'update-in-progress' }
@@ -218,7 +227,8 @@ function Write-AllenBytesAtomic([string]$Path, [byte[]]$Bytes) {
     Assert-AllenNoReparse $Path
     $temporary = $Path + '.tmp-' + [Guid]::NewGuid().ToString('N')
     try {
-        [IO.File]::WriteAllBytes($temporary, $Bytes)
+        $file = New-Object IO.FileStream($temporary, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-AllenFileSecurity))
+        try { $file.Write($Bytes, 0, $Bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
         if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
         else { [IO.File]::Move($temporary, $Path) }
     } finally {

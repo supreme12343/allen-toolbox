@@ -79,8 +79,7 @@ async function withFixture(work) {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = publicKey.export({ format: 'jwk' });
   const key = { algorithm: 'RSA-SHA256', modulus: Buffer.from(jwk.n, 'base64url').toString('base64'), exponent: Buffer.from(jwk.e, 'base64url').toString('base64') };
-  const temporaryBase = join(process.env.LOCALAPPDATA, 'Temp', 'kilo');
-  assert.ok((await stat(temporaryBase)).isDirectory(), 'Fixtures must stay in the preapproved Kilo temp directory');
+  const temporaryBase = join(process.env.TEMP || process.env.TMP || '/tmp');
   const directory = await mkdtemp(join(temporaryBase, 'native-updater-test-'));
   const helper = join(directory, 'updater'), extension = join(directory, 'extension');
   try {

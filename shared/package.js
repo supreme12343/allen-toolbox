@@ -7,13 +7,13 @@ export const EXTENSION_ASSETS = Object.freeze([
   'content/main.js', 'content/content.js',
   'gm/gm-bg.js', 'gm/gm-runtime.js', 'gm/gm-relay.js',
   'shared/features.js', 'shared/hls.js', 'shared/names.js', 'shared/pdf.js', 'shared/tsaudio.js',
-  'shared/usmeta.js', 'shared/utilities.js', 'shared/download.js', 'shared/updates.js', 'shared/zip.js', 'shared/package.js',
+  'shared/usmeta.js', 'shared/utilities.js', 'shared/download.js', 'shared/updates.js', 'shared/update-meta.js', 'shared/native-updater.js', 'shared/zip.js', 'shared/package.js',
   'popup/theme.css', 'popup/popup.html', 'popup/popup.js', 'popup/popup.css', 'popup/editor.html', 'popup/editor.js', 'popup/editor.css',
   'sandbox/check.html', 'sandbox/check.js',
   'icons/icon16.png', 'icons/icon32.png', 'icons/icon48.png', 'icons/icon128.png', 'icons/logo.svg',
   'lib/pdf.min.mjs', 'lib/pdf.worker.min.mjs', 'lib/pdfjs-LICENSE.txt',
   'lib/codemirror.js', 'lib/codemirror.css', 'lib/codemirror.LICENSE',
-  'plugins/plugins.json', 'plugins/PLUGIN_PROMPT.md', 'README.md',
+  'plugins/plugins.json', 'plugins/PLUGIN_PROMPT.md', 'README.md', 'LICENSE',
 ]);
 
 async function assetText(data, path) {
@@ -30,7 +30,7 @@ function scriptPath(file) {
 }
 
 /** Fetch fresh package assets and add only the saved-script snapshot, never browser storage. */
-export async function buildExtensionBundle(snapshot, fetchAsset, manifest) {
+export async function buildExtensionBundle(snapshot, fetchAsset, manifest, additionalFiles = []) {
   if (!Array.isArray(snapshot?.index) || !Array.isArray(snapshot?.files)) throw new Error('The saved script snapshot is invalid');
   const ids = new Set(), paths = new Set(), index = [];
   for (const entry of snapshot.index) {
@@ -89,6 +89,12 @@ export async function buildExtensionBundle(snapshot, fetchAsset, manifest) {
   const entries = [...EXTENSION_ASSETS, ...extra].map((path) => ({ path: 'allen-toolbox/' + path, data: assets.get(path) }));
   entries.push({ path: 'allen-toolbox/scripts/scripts.json', data: JSON.stringify(index, null, 2) + '\n' });
   for (const { path, text } of files.values()) entries.push({ path: 'allen-toolbox/' + path, data: text });
+  if (!Array.isArray(additionalFiles)) throw new Error('Additional package files must be an array');
+  for (const file of additionalFiles) {
+    const path = validateZipPath(file?.path);
+    if (path !== 'Install-ALLEN-Toolbox.cmd' && !path.startsWith('updater/')) throw new Error('Unexpected installer package path: ' + path);
+    entries.push({ path, data: file.data });
+  }
   return createZip(entries);
 }
 

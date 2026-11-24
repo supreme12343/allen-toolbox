@@ -68,6 +68,22 @@ function sameEntity(r, entity) {
 }
 
 const rangeError = () => new DownloadError('DOWNLOAD_RANGE', 'The server returned an invalid or inconsistent byte range. Retry Download; no partial file was saved.');
+const rangeValidator = ({ etag, modified }) => {
+  if (/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) return etag;
+  const asctime = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) ( [1-9]|[12]\d|3[01]) (\d{2}:\d{2}:\d{2}) (\d{4})$/.exec(modified);
+  const timestamp = Date.parse(asctime ? modified + ' GMT' : modified);
+  if (!Number.isFinite(timestamp)) return '';
+  const date = new Date(timestamp), normalized = date.toUTCString();
+  if (modified === normalized) return modified;
+  // HTTP dates also permit RFC 850 and asctime. Compare parsed fields so
+  // Date.parse cannot silently normalize an invalid calendar date or time.
+  const rfc850 = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\d{2})-([A-Z][a-z]{2})-(\d{2}) (\d{2}:\d{2}:\d{2}) GMT$/.exec(modified);
+  if (rfc850 && Number(rfc850[4]) === date.getUTCFullYear() % 100 &&
+      normalized === `${rfc850[1].slice(0, 3)}, ${rfc850[2]} ${rfc850[3]} ${String(date.getUTCFullYear()).padStart(4, '0')} ${rfc850[5]} GMT`) return modified;
+  return asctime && normalized === `${asctime[1]}, ${asctime[3].trim().padStart(2, '0')} ${asctime[2]} ${asctime[5]} ${asctime[4]} GMT` ? modified : '';
+};
+const unvalidatedRange = () => new DownloadError('DOWNLOAD_RANGE', 'The server only supplied part of the media without a usable ETag or Last-Modified validator. A complete response is required; no partial file was saved.');
+const rangeLimit = () => new DownloadError('DOWNLOAD_RANGE_LIMIT', 'The server split the file into too many tiny byte ranges. Reopen the lecture or use the site\'s download; no partial file was saved.');
 const incomplete = () => new DownloadError('DOWNLOAD_PARTIAL', 'The connection stopped before the complete file arrived. Retry Download.', { retryable: true });
 const tooLarge = (limit = MAX_DOWNLOAD_BYTES) => new DownloadError('DOWNLOAD_TOO_LARGE', limit === MAX_DOWNLOAD_BYTES ?
   'This file exceeds the 1 GiB in-memory file limit. Choose a smaller quality or use the site\'s own download; this extension does not stream directly to disk.' :
@@ -165,25 +181,49 @@ export function validateRange(r, range, total, entity) {
 }
 
 export async function fetchBytes(url, opts = {}) {
-  return withResponse(url, opts, async (r, signal) => {
-    if (opts.binary) binaryResponse(r);
-    let full = false, cr;
-    if (opts.range) {
-      if (r.status === 200 && opts.sliceFull && identityBody(r) && !r.headers.get('content-range') && contentLength(r) != null) full = true;
-      else cr = validateRange(r, opts.range, opts.total, opts.entity);
-    } else if (r.status === 206 || r.headers.get('content-range')) {
-      cr = parseContentRange(r.headers.get('content-range'));
-      if (r.status !== 206 || !cr || !identityBody(r) || cr.start !== 0 || cr.end + 1 !== cr.total) throw rangeError();
+  let range = opts.range, total = opts.total, entity = opts.entity;
+  const parts = [], maxBytes = opts.maxBytes ?? MAX_DOWNLOAD_BYTES;
+  if (range && (!Number.isSafeInteger(range.offset) || !Number.isSafeInteger(range.end) || range.offset < 0 || range.end <= range.offset)) throw rangeError();
+  if (range && range.end - range.offset > maxBytes) throw tooLarge(maxBytes);
+  for (;;) {
+    const validator = entity && rangeValidator(entity);
+    const requestOpts = range ? { ...opts, range, headers: { ...opts.headers, ...(validator ? { 'If-Range': validator } : {}) } } : opts;
+    const result = await withResponse(url, requestOpts, async (r, signal) => {
+      if (opts.binary) binaryResponse(r);
+      let full = false, cr;
+      if (range) {
+        if (r.status === 200 && opts.sliceFull && identityBody(r) && !r.headers.get('content-range') && contentLength(r) != null) {
+          full = true;
+          if (total != null && contentLength(r) !== total) throw rangeError();
+          if (entity) sameEntity(r, entity);
+        } else {
+          cr = parseContentRange(r.headers.get('content-range'));
+          if (!cr || cr.end >= range.end) throw rangeError();
+          validateRange(r, { offset: range.offset, end: cr.end + 1 }, total, entity);
+        }
+      } else if (r.status === 206 || r.headers.get('content-range')) {
+        cr = parseContentRange(r.headers.get('content-range'));
+        if (r.status !== 206 || !cr || !identityBody(r) || cr.start !== 0 || cr.end + 1 !== cr.total) throw rangeError();
+      }
+      const expected = cr ? cr.end - cr.start + 1 : contentLength(r);
+      if (expected != null && expected > maxBytes) throw tooLarge(maxBytes);
+      opts.onResponse?.(r, cr);
+      const out = await readBody(r, { ...opts, signal });
+      if (expected != null && out.len !== expected) throw incomplete();
+      if (full && range.end > out.len) throw rangeError();
+      return { blob: full ? out.blob.slice(range.offset, range.end) : out.blob,
+        response: r, full: full ? out.blob : null, total: cr?.total ?? contentLength(r) };
+    });
+    parts.push(result.blob);
+    if (!range || range.offset + result.blob.size === range.end) {
+      const blob = new Blob(parts);
+      return { bytes: await blob.arrayBuffer(), response: result.response, full: result.full, total: result.total };
     }
-    const expected = cr ? cr.end - cr.start + 1 : contentLength(r);
-    if (expected != null && expected > (opts.maxBytes ?? MAX_DOWNLOAD_BYTES)) throw tooLarge(opts.maxBytes);
-    opts.onResponse?.(r, cr);
-    const out = await readBody(r, { ...opts, signal });
-    if (expected != null && out.len !== expected) throw incomplete();
-    if (full && opts.range.end > out.len) throw rangeError();
-    const blob = full ? out.blob.slice(opts.range.offset, opts.range.end) : out.blob;
-    return { bytes: await blob.arrayBuffer(), response: r, full: full ? out.blob : null, total: cr?.total ?? contentLength(r) };
-  });
+    entity ||= entityOf(result.response); total = result.total;
+    if (!rangeValidator(entity)) throw unvalidatedRange();
+    if (parts.length >= MAX_HTTP_RANGE_PARTS) throw rangeLimit();
+    range = { ...range, offset: range.offset + result.blob.size };
+  }
 }
 
 export const fetchBuffer = async (url, opts) => (await fetchBytes(url, opts)).bytes;
@@ -196,112 +236,111 @@ export async function fetchText(url, opts = {}) {
 export async function downloadFile(url, opts = {}) {
   const maxBytes = opts.maxBytes ?? MAX_DOWNLOAD_BYTES;
   const progress = (bytes, total) => opts.onProgress?.({ bytes, total: total || 0 });
-  const full = () => withResponse(url, opts, async (r, signal) => {
-    binaryResponse(r);
-    const cr = r.status === 206 || r.headers.get('content-range') ? parseContentRange(r.headers.get('content-range')) : null;
-    if ((r.status === 206 || r.headers.get('content-range')) && (r.status !== 206 || !cr || !identityBody(r) || cr.start !== 0 || cr.end + 1 !== cr.total)) throw rangeError();
-    const total = cr?.total ?? contentLength(r);
-    if (total != null && total > maxBytes) throw tooLarge(maxBytes);
-    let loaded = 0; progress(0, total);
-    const out = await readBody(r, { ...opts, signal, maxBytes, onBytes: (n) => { loaded += n; progress(loaded, total); } });
-    if (total != null && out.len !== total) throw incomplete();
-    if (!out.len) throw new DownloadError('DOWNLOAD_EMPTY', 'The server sent an empty file. Reopen the lecture and retry Download.');
-    return { ...out, response: r };
-  });
-
-  let first;
-  try {
-    first = await withResponse(url, opts, async (r, signal) => {
-      binaryResponse(r);
-      const hasRange = r.status === 206 || !!r.headers.get('content-range');
-      const cr = hasRange ? parseContentRange(r.headers.get('content-range')) : null;
-      if (hasRange && (r.status !== 206 || !cr || !identityBody(r) || cr.start !== 0)) throw rangeError();
-      const total = cr?.total ?? contentLength(r), expected = cr ? cr.end + 1 : total;
-      if (total != null && total > maxBytes) throw tooLarge(maxBytes);
-      if (cr && contentLength(r) != null && contentLength(r) !== expected) throw rangeError();
-      let loaded = 0; progress(0, total);
-      let out, err;
-      try { out = await readBody(r, { ...opts, signal, maxBytes, onBytes: (n) => { loaded += n; progress(loaded, total); } }); }
-      catch (e) {
-        if (!e.partial || signal.aborted || e.code === 'DOWNLOAD_TOO_LARGE') throw e;
-        if (!(e.retryable || e.name === 'TypeError' || e.name === 'NetworkError')) throw e;
-        out = e.partial; err = e;
-      }
-      if (expected != null && out.len > expected) throw rangeError();
-      if (expected != null && out.len < expected) err ||= incomplete();
-      return { ...out, response: r, total, cr, err };
-    });
-  } catch (err) {
-    if (err.code === 'DOWNLOAD_RANGE') return full();
-    throw err;
-  }
-  checkAbort(opts.signal);
-  if (!first.err && (first.total == null || first.len === first.total)) {
-    if (!first.len) throw new DownloadError('DOWNLOAD_EMPTY', 'The server sent an empty file');
-    return first;
-  }
-  const entity = entityOf(first.response);
-  const validator = entity.etag && !/^W\//i.test(entity.etag) ? entity.etag : entity.modified;
-  if (!first.total || !first.len || first.len >= first.total || !identityBody(first.response) || !validator ||
-      !(first.cr || /\bbytes\b/i.test(first.response.headers.get('accept-ranges') || ''))) {
-    first = null;
-    return full();
-  }
-
-  const ctl = new AbortController(), cancel = () => ctl.abort(opts.signal.reason);
-  opts.signal?.addEventListener('abort', cancel, { once: true });
-  const total = first.total, start = first.len;
-  const wanted = Number.isInteger(opts.concurrency) ? Math.max(1, Math.min(16, opts.concurrency)) : 8;
-  const piece = Math.min(8 * MB, Math.max(MB, Math.ceil((total - start) / (wanted * 3))));
-  const intervals = [];
-  for (let offset = start; offset < total; offset += piece) intervals.push({ offset, end: Math.min(total, offset + piece) });
-  const parts = new Array(intervals.length), loaded = new Array(intervals.length).fill(0);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(wanted, intervals.length) }, async () => {
-    for (;;) {
-      checkAbort(ctl.signal);
-      const i = next++;
-      if (i >= intervals.length) return;
-      const interval = intervals[i], chunks = [];
-      let offset = interval.offset;
-      // Some media servers cap each response below the requested end. Fetch the remainder,
-      // but only join contiguous, complete spans from the same validated file.
-      while (offset < interval.end) {
-        if (chunks.length >= MAX_HTTP_RANGE_PARTS) throw new DownloadError('DOWNLOAD_RANGE_LIMIT', 'The server split the file into too many tiny byte ranges. Reopen the lecture or use the site\'s download; no partial file was saved.');
-        const range = { offset, end: interval.end };
-        const out = await withResponse(url, { ...opts, signal: ctl.signal, range, headers: { ...opts.headers, 'If-Range': validator } }, async (r, signal) => {
-          binaryResponse(r);
-          const cr = parseContentRange(r.headers.get('content-range'));
-          if (!cr || cr.end >= range.end) throw rangeError();
-          validateRange(r, { offset, end: cr.end + 1 }, total, entity);
-          loaded[i] = offset - interval.offset;
-          let body;
-          try {
-            body = await readBody(r, { ...opts, signal, maxBytes: cr.end - cr.start + 1, onBytes: (n) => {
-              loaded[i] += n;
-              if (!ctl.signal.aborted) progress(Math.min(total, start + loaded.reduce((s, x) => s + x, 0)), total);
-            } });
-          } catch (error) { if (error.code === 'DOWNLOAD_TOO_LARGE') throw rangeError(); throw error; }
-          if (body.len !== cr.end - cr.start + 1) throw incomplete();
-          return body;
-        });
-        chunks.push(out.blob); offset += out.len;
-      }
-      parts[i] = new Blob(chunks);
+  let zeroBased = false;
+  // Discard old pieces before one clean restart. Only range responses need an
+  // explicit byte-zero request; ordinary-body failures keep a plain GET retry.
+  for (let fresh = false; ; fresh = true) {
+    const initialOpts = fresh ? { ...opts, range: null, headers: {
+      ...Object.fromEntries(Object.entries(opts.headers || {}).filter(([k]) => !/^(range|if-range|if-none-match|if-modified-since)$/i.test(k))),
+      ...(zeroBased ? { Range: 'bytes=0-' } : {}),
+    } } : opts;
+    let first;
+    try {
+      first = await withResponse(url, initialOpts, async (r, signal) => {
+        binaryResponse(r);
+        const hasRange = r.status === 206 || !!r.headers.get('content-range');
+        const cr = hasRange ? parseContentRange(r.headers.get('content-range')) : null;
+        if (!fresh) zeroBased = hasRange && identityBody(r);
+        if (hasRange && (r.status !== 206 || !cr || !identityBody(r) || cr.start !== 0)) throw rangeError();
+        const total = cr?.total ?? contentLength(r), expected = cr ? cr.end + 1 : total;
+        if (total != null && total > maxBytes) throw tooLarge(maxBytes);
+        if (cr && contentLength(r) != null && contentLength(r) !== expected) throw rangeError();
+        let loaded = 0; progress(0, total);
+        let out, err;
+        try { out = await readBody(r, { ...opts, signal, maxBytes, onBytes: (n) => { loaded += n; progress(loaded, total); } }); }
+        catch (e) {
+          if (!e.partial || signal.aborted || e.code === 'DOWNLOAD_TOO_LARGE') throw e;
+          if (!(e.retryable || e.name === 'TypeError' || e.name === 'NetworkError')) throw e;
+          out = e.partial; err = e;
+        }
+        if (expected != null && out.len > expected) throw rangeError();
+        if (expected != null && out.len < expected) err ||= incomplete();
+        const entity = entityOf(r), validator = rangeValidator(entity);
+        const resumable = total && out.len && out.len < total && identityBody(r) && validator &&
+          (cr || /\bbytes\b/i.test(r.headers.get('accept-ranges') || ''));
+        if (fresh && err && !resumable) throw err;
+        return { ...out, response: r, total, cr, err, entity, validator, resumable };
+      });
+    } catch (err) {
+      if (!fresh && err.code === 'DOWNLOAD_RANGE') continue;
+      throw err;
     }
-  });
-  try {
-    await Promise.all(workers);
     checkAbort(opts.signal);
-    if (parts.includes(undefined)) throw incomplete();
-    const blob = new Blob([first.blob, ...parts]);
-    if (blob.size !== total) throw incomplete();
-    return { blob, len: blob.size, response: first.response };
-  } catch (err) {
-    ctl.abort(err);
-    await Promise.allSettled(workers);
-    checkAbort(opts.signal);
-    if (err.code === 'DOWNLOAD_RANGE' || err.code === 'DOWNLOAD_CHANGED') { first = null; parts.length = 0; return await full(); }
-    throw err;
-  } finally { opts.signal?.removeEventListener('abort', cancel); }
+    if (!first.err && (first.total == null || first.len === first.total)) {
+      if (!first.len) throw new DownloadError('DOWNLOAD_EMPTY', 'The server sent an empty file');
+      return first;
+    }
+    const { entity, validator } = first;
+    if (!first.resumable) {
+      if (!fresh) { first = null; continue; }
+      throw first.err || (!validator && first.cr ? unvalidatedRange() : rangeError());
+    }
+
+    const ctl = new AbortController(), cancel = () => ctl.abort(opts.signal.reason);
+    opts.signal?.addEventListener('abort', cancel, { once: true });
+    const total = first.total, start = first.len;
+    const wanted = Number.isInteger(opts.concurrency) ? Math.max(1, Math.min(16, opts.concurrency)) : 8;
+    const piece = Math.min(8 * MB, Math.max(MB, Math.ceil((total - start) / (wanted * 3))));
+    const intervals = [];
+    for (let offset = start; offset < total; offset += piece) intervals.push({ offset, end: Math.min(total, offset + piece) });
+    const parts = new Array(intervals.length), loaded = new Array(intervals.length).fill(0);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(wanted, intervals.length) }, async () => {
+      for (;;) {
+        checkAbort(ctl.signal);
+        const i = next++;
+        if (i >= intervals.length) return;
+        const interval = intervals[i], chunks = [];
+        let offset = interval.offset;
+        // Some media servers cap each response below the requested end. Fetch the remainder,
+        // but only join contiguous, complete spans from the same validated file.
+        while (offset < interval.end) {
+          if (chunks.length >= MAX_HTTP_RANGE_PARTS) throw rangeLimit();
+          const range = { offset, end: interval.end };
+          const out = await withResponse(url, { ...opts, signal: ctl.signal, range, headers: { ...opts.headers, 'If-Range': validator } }, async (r, signal) => {
+            binaryResponse(r);
+            const cr = parseContentRange(r.headers.get('content-range'));
+            if (!cr || cr.end >= range.end) throw rangeError();
+            validateRange(r, { offset, end: cr.end + 1 }, total, entity);
+            loaded[i] = offset - interval.offset;
+            let body;
+            try {
+              body = await readBody(r, { ...opts, signal, maxBytes: cr.end - cr.start + 1, onBytes: (n) => {
+                loaded[i] += n;
+                if (!ctl.signal.aborted) progress(Math.min(total, start + loaded.reduce((s, x) => s + x, 0)), total);
+              } });
+            } catch (error) { if (error.code === 'DOWNLOAD_TOO_LARGE') throw rangeError(); throw error; }
+            if (body.len !== cr.end - cr.start + 1) throw incomplete();
+            return body;
+          });
+          chunks.push(out.blob); offset += out.len;
+        }
+        parts[i] = new Blob(chunks);
+      }
+    });
+    try {
+      await Promise.all(workers);
+      checkAbort(opts.signal);
+      if (parts.includes(undefined)) throw incomplete();
+      const blob = new Blob([first.blob, ...parts]);
+      if (blob.size !== total) throw incomplete();
+      return { blob, len: blob.size, response: first.response };
+    } catch (err) {
+      ctl.abort(err);
+      await Promise.allSettled(workers);
+      checkAbort(opts.signal);
+      if (!fresh && (err.code === 'DOWNLOAD_RANGE' || err.code === 'DOWNLOAD_CHANGED')) { first = null; parts.length = 0; continue; }
+      throw err;
+    } finally { opts.signal?.removeEventListener('abort', cancel); }
+  }
 }

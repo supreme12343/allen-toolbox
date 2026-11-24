@@ -7,10 +7,12 @@ import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 const repository = OFFICIAL_REPOSITORY, commit = 'a'.repeat(40);
 const hash = (data) => createHash('sha256').update(data).digest('hex');
 const archive = Buffer.from('ZIP fixture'), filename = 'ALLEN-Toolbox-2.1.1.zip', checksum = hash(archive);
-const release = { repository, version: '2.1.1', tag: 'v2.1.1', filename, checksum, blob: new Blob([archive]) };
+const signature = Buffer.alloc(384, 17);
+const release = { repository, version: '2.1.1', tag: 'v2.1.1', filename, checksum, signature, blob: new Blob([archive]) };
 const checksumText = checksum + '  ' + filename + '\n';
 const expected = [{ name: filename, size: archive.length, digest: 'sha256:' + checksum, state: 'uploaded' },
-  { name: filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText), state: 'uploaded' }];
+  { name: filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText), state: 'uploaded' },
+  { name: filename + '.sig', size: signature.length, digest: 'sha256:' + hash(signature), state: 'uploaded' }];
 const draft = (assets = []) => ({ tag_name: release.tag, draft: true, prerelease: false, assets: structuredClone(assets) });
 
 function fixture(options = {}) {
@@ -50,7 +52,7 @@ function fixture(options = {}) {
     }
     return '';
   };
-  env.publish = () => publishRelease({ repository, commit, release, run: env.run });
+  env.publish = () => publishRelease({ repository, commit, release, run: env.run, verifyPublished: async () => options.invalidPublished ? false : true });
   env.calls = calls;
   return env;
 }
@@ -87,6 +89,11 @@ test('drafts hidden by the REST tag endpoint are resolved by authenticated relea
   assert.ok(!env.calls.some((call) => call.args[1] === 'create'));
 });
 
+test('unsigned or malformed signature releases cannot create tags or publish executable updates', async () => {
+  const env = fixture();
+  for (const signature of [null, Buffer.alloc(12)]) await assert.rejects(publishRelease({ repository, commit, release: { ...release, signature }, run: env.run }), /publication identity/);
+  assert.equal(env.calls.length, 0);
+});
 test('unresolved repositories and invalid release IDs cannot create tags or modify releases', async (t) => {
   for (const lookupResponse of [{ data: { repository: null } }, { data: { repository: { release: { databaseId: 'untrusted' } } } }]) await t.test(JSON.stringify(lookupResponse), async () => {
     const env = fixture({ lookupResponse });
@@ -98,6 +105,12 @@ test('unresolved repositories and invalid release IDs cannot create tags or modi
 test('already published releases are never modified even when the new main commit differs', async () => {
   const env = fixture({ tag: 'b'.repeat(40), state: { ...draft(expected), draft: false } });
   assert.equal((await env.publish()).skipped, true);
+  assert.ok(env.calls.every((call) => call.command === 'gh' && call.args[0] === 'api'));
+});
+
+test('a published but unauthentic release is refused without repairing or replacing its assets', async () => {
+  const env = fixture({ tag: commit, state: { ...draft(expected), draft: false }, invalidPublished: true });
+  await assert.rejects(env.publish(), /could not be authenticated/);
   assert.ok(env.calls.every((call) => call.command === 'gh' && call.args[0] === 'api'));
 });
 

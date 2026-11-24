@@ -455,7 +455,7 @@ async function runHls(msg, job) {
   };
   const rangeSources = new Map(), rangeQueues = new Map();
   const mediaBytes = (url, range) => {
-    if (!range) return fetchBuffer(url, { ...opts, binary: true });
+    if (!range) return downloadFile(url, opts).then((out) => out.blob.arrayBuffer());
     const previous = rangeQueues.get(url) || Promise.resolve();
     const pending = previous.catch(() => {}).then(async () => {
       checkAbort(signal);

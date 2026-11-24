@@ -136,8 +136,10 @@
         <button id="update-auto" class="row update-toggle" role="switch" aria-label="Automatic update checks" aria-describedby="update-auto-help" aria-checked="false" disabled><span class="tx"><span class="nm">Automatic update checks</span><span id="update-auto-help" class="ds">Check GitHub every hour and notify when a newer version is published.</span></span><span class="sw" aria-hidden="true"><i></i></span></button>
         <div class="grid"><button id="update-check" class="btn primary" disabled>Check for updates</button><button id="update-release" class="btn" hidden>View release</button></div>
         <button id="update-download" class="btn primary wide" hidden>Download update ZIP</button>
+        <button id="update-install" class="btn primary wide" hidden>Install update with Windows updater</button>
+        <p id="native-updater-status" class="status" role="status" aria-live="polite">Checking Windows updater setup...</p>
         <p id="update-status" class="status" role="status" aria-live="polite" aria-atomic="true">Loading update settings...</p>
-        <p id="update-help">GitHub ZIPs cannot silently update a Load unpacked installation. Replace files in the original extension folder, then reload it at chrome://extensions. Fully automatic extension installs require Chrome Web Store distribution. Saved userscript edits are preserved, not overwritten.</p>
+        <p id="update-help">The official ZIP includes Install-ALLEN-Toolbox.cmd. Run it once and explicitly approve the optional Windows updater; then it can verify and install future releases automatically. Chrome still requires the initial Load unpacked step. Downloading or reading the README does not consent to installation. Without the helper, replace files manually and reload at chrome://extensions. Saved scripts and browser data are preserved.</p>
       </div>
 
       <div class="group-title">Access</div>

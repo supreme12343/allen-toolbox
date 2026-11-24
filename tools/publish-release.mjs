@@ -6,20 +6,46 @@ import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildRelease } from './release.mjs';
 import { githubRepository, versionParts, OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { readBody } from '../shared/download.js';
+import { verifyUpdate } from './update-signing.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hash = (data) => createHash('sha256').update(data).digest('hex');
 const execute = async (command, args) => (await promisify(execFile)(command, args, { cwd: root, encoding: 'utf8', maxBuffer: 1024 * 1024 })).stdout;
 
-export async function publishRelease({ repository, commit, release, run = execute }) {
+export async function verifyPublishedAssets(state, repository, fetcher = fetch) {
+  const verification = JSON.parse(await readFile(resolve(root, 'updater/public-key.json'), 'utf8'));
+  const filename = 'ALLEN-Toolbox-' + state.tag_name.replace(/^v/, '') + '.zip';
+  const files = [filename, filename + '.sig', filename + '.sha256'];
+  const data = [];
+  for (const name of files) {
+    const asset = state.assets.find((value) => value.name === name), url = repository + '/releases/download/' + state.tag_name + '/' + name;
+    if (!asset || asset.browser_download_url !== url || !/^sha256:[a-f\d]{64}$/.test(asset.digest || '')) throw new Error('Published release asset identity is invalid');
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetcher(url, { signal: controller.signal, credentials: 'omit' });
+      if (!response.ok) throw new Error('Published release asset could not be verified');
+      const result = await readBody(response, { signal: controller.signal, maxBytes: name === filename ? 64 * 1024 * 1024 : 8192 });
+      const bytes = new Uint8Array(await result.blob.arrayBuffer());
+      if (bytes.length !== asset.size || 'sha256:' + hash(bytes) !== asset.digest) throw new Error('Published release bytes differ from the declared asset');
+      data.push(bytes);
+    } finally { clearTimeout(timer); }
+  }
+  if (!verifyUpdate(data[0], data[1], verification) || new TextDecoder().decode(data[2]) !== hash(data[0]) + '  ' + filename + '\n') throw new Error('Published release signature or checksum is invalid');
+  return true;
+}
+
+export async function publishRelease({ repository, commit, release, run = execute, verifyPublished = verifyPublishedAssets }) {
   const repo = githubRepository(repository), slug = repo.slice('https://github.com/'.length);
   versionParts(release.version);
   if (repo !== OFFICIAL_REPOSITORY || release.repository !== repo || release.tag !== 'v' + release.version || release.filename !== 'ALLEN-Toolbox-' + release.version + '.zip' ||
       !/^[a-f\d]{64}$/.test(release.checksum) || !Number.isSafeInteger(release.blob?.size) || release.blob.size <= 0 ||
+      !(release.signature instanceof Uint8Array) || release.signature.length < 256 || release.signature.length > 512 ||
       !/^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(commit)) throw new Error('Invalid release publication identity');
   const checksumText = release.checksum + '  ' + release.filename + '\n';
   const expected = [{ name: release.filename, size: release.blob.size, digest: 'sha256:' + release.checksum },
-    { name: release.filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText) }];
+    { name: release.filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText) },
+    { name: release.filename + '.sig', size: release.signature.length, digest: 'sha256:' + hash(release.signature) }];
   let releaseId;
   const readRelease = async () => {
     if (!releaseId) {
@@ -42,6 +68,7 @@ export async function publishRelease({ repository, commit, release, run = execut
   let state = await readRelease();
   if (state && !state.draft) {
     if (!expected.every((file) => state.assets.some((asset) => asset.name === file.name && asset.state === 'uploaded' && asset.size > 0))) throw new Error('The published release is incomplete. Publish a new version; existing releases are not modified.');
+    if (!(await verifyPublished(state, repo))) throw new Error('The published release could not be authenticated; it was not modified');
     return { skipped: true, tag: release.tag };
   }
 
@@ -75,10 +102,13 @@ export async function publishRelease({ repository, commit, release, run = execut
 async function main() {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('Publication runs only in the main-branch GitHub Actions workflow');
   const repository = githubRepository('https://github.com/' + process.env.GITHUB_REPOSITORY);
-  const release = await buildRelease({ repository });
+  if (!process.env.UPDATER_SIGNING_KEY) throw new Error('Signed updater publication requires UPDATER_SIGNING_KEY');
+  const release = await buildRelease({ repository, signingKey: process.env.UPDATER_SIGNING_KEY });
   const archive = await readFile(resolve(root, 'dist', release.filename));
   const checksum = await readFile(resolve(root, 'dist', release.filename + '.sha256'), 'utf8');
+  const signature = await readFile(resolve(root, 'dist', release.filename + '.sig'));
   if (hash(archive) !== release.checksum || archive.length !== release.blob.size || checksum !== release.checksum + '  ' + release.filename + '\n') throw new Error('The built files do not match the tested source package');
+  if (!signature.equals(release.signature)) throw new Error('The built updater signature does not match the tested source package');
   const result = await publishRelease({ repository, commit: process.env.GITHUB_SHA, release });
   console.log(result.skipped ? 'Published version already exists; no release was modified: ' + result.tag : 'Published complete release: ' + result.tag);
 }

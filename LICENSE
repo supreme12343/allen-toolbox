@@ -1,0 +1,72 @@
+SHAAN RESTRICTED SOURCE LICENSE 1.0
+
+Copyright (c) 2026 Shaan. All rights reserved except as expressly granted below.
+
+1. Scope
+
+This notice applies only to original ALLEN Toolbox code and other material
+for which Shaan owns or controls the relevant copyright. It does not claim
+ownership of third-party components, user-provided scripts, or another
+author's contributions and cannot remove rights already granted by them.
+
+2. Personal-use permission
+
+Individuals may download and run official, unmodified releases for personal,
+non-commercial use on their own devices. They may inspect the source for
+personal safety and security review, and share unmodified official releases
+with this notice and all third-party notices intact. No platform affiliation,
+endorsement, or ownership may be misrepresented.
+
+3. Restricted reuse
+
+Except for the permission above, and to the extent enforceable under
+applicable law, prior written permission from Shaan is required to copy,
+modify, adapt, incorporate, sublicense, commercialize, or redistribute the
+original code or a derivative of its protected expression.
+
+No permission is granted to reuse the original code or its protected
+expression to develop, improve, test, or modify an existing software system,
+website, service, or platform. This includes incorporation into ALLEN or
+another education platform, or reuse to develop countermeasures intended to
+detect, disable, obstruct, or prevent ALLEN Toolbox from working.
+
+Copyright and attribution notices must not be removed from permitted copies.
+
+4. Limits of these restrictions
+
+This notice does not claim copyright over general ideas, functionality,
+methods, algorithms as such, independently written implementations, or
+knowledge that applicable law does not protect as copyrighted expression.
+It cannot guarantee that someone will not read public code, take inspiration
+from it, or independently improve or secure their own system without using
+protected code. Mandatory legal rights, applicable exceptions, and rights
+granted by the hosting platform's terms remain unaffected.
+
+This is a restricted source-available license, not an open-source license
+and not copyleft. Obtain qualified legal advice before relying on particular
+restrictions or enforcement in a jurisdiction.
+
+5. Third-party components
+
+Third-party licenses remain in full force and govern their own components.
+In particular, pdf.js remains under Apache-2.0 and CodeMirror remains under
+MIT. Their notices in lib/pdfjs-LICENSE.txt and lib/codemirror.LICENSE must
+be preserved. This notice does not restrict rights those licenses grant.
+
+6. Installation consent
+
+Downloading or reading this project does not authorize software installation,
+background tasks, registry changes, or automatic updates. Installation of
+the optional Windows updater requires the installer's separate, explicit
+approval. Its documented uninstall controls remain available.
+
+7. Disclaimer
+
+TO THE EXTENT PERMITTED BY LAW, THE MATERIAL IS PROVIDED "AS IS", WITHOUT
+WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. SHAAN AND OTHER
+COPYRIGHT HOLDERS ARE NOT LIABLE FOR CLAIMS OR DAMAGES ARISING FROM ITS
+USE, EXCEPT WHERE APPLICABLE LAW DOES NOT PERMIT THAT LIMITATION.
+
+Requests for permissions not granted here should be addressed to Shaan
+through the official project: https://github.com/supreme12343/allen-toolbox.

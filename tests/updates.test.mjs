@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { githubRepository, versionParts, compareVersions, githubRelease, initUpdates, UPDATE_ALARM, OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { githubRepository, versionParts, compareVersions, githubRelease, initUpdates, UPDATE_ALARM, UPDATE_RELOAD_ALARM, OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const repository = OFFICIAL_REPOSITORY;
 const HOUR = 60 * 60 * 1000;
@@ -15,6 +15,8 @@ async function harness(options = {}) {
   const data = options.data || {}, alarms = new Map(), notifications = [], cleared = [], downloads = [], tabs = [], calls = [], leases = [], released = [];
   if (!options.data && !options.fresh) data.githubUpdates = { repository, automatic: false };
   let time = 100 * HOUR;
+  let reloads = 0, reloaded;
+  const reloadSignal = new Promise((resolve) => { reloaded = resolve; });
   const browser = {
     runtime: { getManifest: () => ({ version: options.version || '2.1.1', homepage_url: options.homepage }),
       getURL: (path) => 'chrome-extension://fixture/' + path, onInstalled: event(), onStartup: event() },
@@ -23,18 +25,20 @@ async function harness(options = {}) {
       if (options.beforeWrite) await options.beforeWrite(value);
       Object.assign(data, structuredClone(value));
     } } },
-    alarms: { onAlarm: event(), async get(name) { return alarms.get(name); }, async create(name, value) { alarms.set(name, value); }, async clear(name) { return alarms.delete(name); } },
+    alarms: { onAlarm: event(), async get(name) { return alarms.get(name); }, async create(name, value) { alarms.set(name, value); options.onAlarmCreate?.(name); }, async clear(name) { return alarms.delete(name); } },
     notifications: { onClicked: event(), async create(id, value) { notifications.push({ id, ...value }); return id; }, async clear(id) { cleared.push(id); } },
     downloads: { async download(value) { downloads.push(value); return downloads.length; } },
     tabs: { async create(value) { tabs.push(value); return value; } },
   };
+  browser.runtime.reload = () => { reloads++; reloaded(); };
   const api = initUpdates({ chrome: browser, now: () => time, timeout: options.timeout || 20000,
+    nativeUpdater: options.nativeUpdater, busy: options.busy || (() => false),
     fetch: async (url, value) => { calls.push({ url, ...value }); return options.fetch ? options.fetch(url, value, calls.length) : jsonResponse(); },
     async acquireRequest(value) { leases.push(value); if (options.acquire) return options.acquire(value); },
     async releaseRequest(id) { released.push(id); if (options.release) return options.release(id); },
   });
   await api.status(); await tick();
-  return { api, browser, data, alarms, notifications, cleared, downloads, tabs, calls, leases, released, advance(ms) { time += ms; } };
+  return { api, browser, data, alarms, notifications, cleared, downloads, tabs, calls, leases, released, reloadSignal, get reloads() { return reloads; }, advance(ms) { time += ms; } };
 }
 
 test('GitHub configuration accepts only a public HTTPS owner/repository URL', () => {
@@ -232,4 +236,34 @@ test('failed settings persistence does not replace the working repository', asyn
   const env = await harness({ failStorage: true });
   await assert.rejects(env.api.configure({ repository, automatic: true }), /Storage unavailable/);
   assert.equal((await env.api.status()).repository, repository);
+});
+
+test('approved native installation reloads only after a confirmed newer installed version', async () => {
+  let installs = 0, state = { installed: true };
+  const native = { async refresh() { return state; }, async status() { return state; }, isApplying: () => false,
+    async update() { installs++; state = { installed: true, installedVersion: '2.1.2', state: 'updated', requiresReload: true }; return state; } };
+  const env = await harness({ nativeUpdater: native });
+  await env.api.configure({ automatic: true });
+  const result = await env.api.check({ force: true });
+  assert.equal(installs, 1); assert.equal(result.native.state, 'updated'); assert.equal(env.reloads, 0);
+  await env.reloadSignal; assert.equal(env.reloads, 1);
+});
+
+test('confirmed reloads persist through busy intervals even when GitHub checks are disabled', async () => {
+  let isBusy = true, armed;
+  const alarmSignal = new Promise((resolve) => { armed = resolve; });
+  const state = { installed: true, installedVersion: '2.1.2', state: 'up-to-date', requiresReload: true };
+  const native = { async refresh() { return state; }, async status() { return state; }, isApplying: () => false, async update() { return state; } };
+  const env = await harness({ nativeUpdater: native, busy: () => isBusy, onAlarmCreate: (name) => { if (name === UPDATE_RELOAD_ALARM) armed(); } });
+  await alarmSignal;
+  assert.equal(env.reloads, 0); assert.equal(env.calls.length, 0);
+  isBusy = false; await env.browser.alarms.onAlarm.emit({ name: UPDATE_RELOAD_ALARM });
+  await env.reloadSignal; assert.equal(env.reloads, 1);
+});
+
+test('missing native setup never claims automatic installation and keeps ZIP fallback', async () => {
+  const env = await harness(); await env.api.configure({ automatic: true });
+  const result = await env.api.check({ force: true });
+  assert.equal(result.native.installed, false); assert.equal(env.reloads, 0);
+  assert.equal((await env.api.download()).queued, true);
 });

@@ -1,4 +1,4 @@
-# ALLEN Toolbox 2.1.3
+# ALLEN Toolbox 2.2.0
 
 A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 
@@ -7,13 +7,13 @@ A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 * **Recordings**: direct files and supported HLS VOD, transient-request retries, bounded timeouts, verified ranges and final sizes. Separate HLS audio is downloadable and is clearly distinguished from a combined recording.
 * **Scripts**: a local userscript editor and manager, a real `scripts/` folder, and **Export extension ZIP** to ship saved scripts with the entire runtime extension.
 * **Utilities**: reversible overlay cleanup, focus reading, clean-link and page-link copying, text export, visible screenshots, playback speed, media rescan, and browser downloads access.
-* **GitHub updates**: automatic hourly checks of the fixed official repository, newer-version notifications, a manual check and release ZIP download. No URL setup is required or available. GitHub Actions builds and publishes a new version after a push to `main`.
+* **GitHub updates**: automatic hourly checks of the fixed official repository and optional signed automatic installation through the bundled Windows updater. No URL setup is required or available. GitHub Actions builds, signs and publishes a new version after a push to `main`.
 
 ## Install
 
-1. Unzip the extension ZIP somewhere permanent (Chrome loads the extension from that folder).
-2. Open `chrome://extensions` and switch on **Developer mode** (top-right).
-3. Click **Load unpacked** and select the **`allen-toolbox`** folder, the one containing `manifest.json`.
+1. Download the official ZIP and extract it. On Windows, run **`Install-ALLEN-Toolbox.cmd`** to install the extension files and optional external updater together. Read its setup details and approve explicitly; choosing No leaves installation unchanged.
+2. Open `chrome://extensions` and switch on **Developer mode** (top-right). A downloaded file or Windows installer cannot silently register an unpacked extension in Chrome.
+3. Click **Load unpacked** and select **`%LOCALAPPDATA%\ALLENToolbox\extension`** after managed setup. For manual installation without the updater, select the extracted **`allen-toolbox`** folder instead and keep that folder permanent.
 4. Pin the extension (puzzle-piece icon → pin).
 
 ### One switch for scripts (needed once)
@@ -22,20 +22,32 @@ Use a current desktop Chrome/Chromium browser, preferably 138+. Chrome only runs
 
 > Chrome cannot install a `.zip` directly — unzip it and use **Load unpacked**.
 
+### Windows updater consent and uninstall
+
+**Downloading the ZIP, reading this README, or accepting the source license does not consent to installing software or background tasks.** The installer asks separately before changing anything. Setup creates files under your user account, an hourly/logon scheduled task, and per-user Native Messaging registrations for Chrome, Edge and Brave. It does not require administrator rights or change your browser profile, global PowerShell execution policy, or arbitrary system folders.
+
+After this one-time setup and the initial Load unpacked step, the external updater can install future official signed releases automatically. Scheduled checks defer while a browser is open; browser-triggered installation waits until active downloads finish, then reloads the extension. Existing webpage scripts may require a page refresh. **Utilities > GitHub updates** displays the Windows updater status. Its check switch controls browser checks; use the installer uninstall flow to remove the separate background schedule.
+
+For an existing unpacked installation, keep its original folder/identity by running the included `updater/install.ps1` with `-Attach -ExtensionDirectory "C:\path\to\existing\allen-toolbox"` and approving the prompt. Do not move/remove an existing extension if you want to retain its local browser data.
+
+To remove the optional helper, run `%LOCALAPPDATA%\ALLENToolbox\updater\install.ps1 -Uninstall` and approve its separate confirmation. Only this updater's registrations, task and helper files are removed; your extension folder and browser-stored scripts/settings remain. Update backups are retained for recovery and are not automatically deleted.
+
 ## GitHub releases and updates
 
 Source and releases: [supreme12343/allen-toolbox](https://github.com/supreme12343/allen-toolbox). The extension is hard-locked to this official update source. Users never enter a repository URL and cannot change it through settings or saved configuration. Review userscripts for embedded secrets before every push; release packaging does not sanitize source code.
 
-1. Push the source to the repository's `main` branch, or run its **Build and release** GitHub Actions workflow manually. Actions runs syntax checks and regression tests before publishing `v<version>` with `ALLEN-Toolbox-<version>.zip` and its SHA-256 checksum.
+1. Push the source to the repository's `main` branch, or run its **Build and release** GitHub Actions workflow manually. Actions runs syntax checks and regression tests before publishing `v<version>` with `ALLEN-Toolbox-<version>.zip`, its SHA-256 checksum and its RSA-SHA256 `.zip.sig` signature.
 2. For each subsequent update, increase **both** `manifest.json` and `package.json` to the same newer numeric version, then push to `main`. A published version/tag is not replaced. A push without a version increase does not deliver a new update.
 3. Release packaging embeds the official repository and the updater independently pins the same source in code. People installing the ZIP get hourly checks automatically and a notification when a newer release appears. The browser must be running and allow notifications; checks are not instant push delivery.
 4. **Utilities > GitHub updates** shows the official source as a link, not an editable field. Automatic checks can be switched off; **Check for updates**, **View release** and **Download update ZIP** remain available manually. Legacy or tampered repository settings are ignored and migrated back to the official source.
 
 A local release can also be built with Node 24+: `npm.cmd run release`. Outputs are in `dist/` and always use `https://github.com/supreme12343/allen-toolbox`. Build or publication attempts targeting another update repository are rejected.
 
-Publication keeps the release in draft until both the ZIP and checksum are uploaded and their hashes verified. If a tag push or upload succeeds but a later step fails, rerun **the same workflow run/commit** to resume missing draft uploads. Existing draft files with a different hash are refused, not overwritten. Published releases are never repaired in place; publish a newer version if an old release is incomplete.
+Publication keeps the release in draft until the ZIP, checksum and signature are uploaded and their hashes verified. The private signing key is stored only in the repository's `UPDATER_SIGNING_KEY` Actions secret; the helper pins the public verification key. Unsigned, modified, oversized, foreign-source or unsafe-path archives are refused before installation. A checksum downloaded from the same site is not used as a substitute for the signature.
 
-**Chrome limitation:** a Load unpacked extension cannot replace its own installed files. After downloading the update ZIP, close toolbox/editor tabs, extract it, replace files in the **original permanent installation folder**, and press **Reload** at `chrome://extensions`; then reload the website. Do not remove/reinstall or move the extension if you want to retain its local script values/settings. ZIP downloads are reported as queued, not installed or saved. Fully automatic whole-extension updates require Chrome Web Store distribution (or a supported managed deployment); this workflow produces ZIPs, not signed CRXs, and does not publish to the store.
+If a tag push or upload succeeds but a later step fails, rerun **the same workflow run/commit** to resume missing draft uploads. Existing draft files with a different hash are refused, not overwritten. Published releases are never repaired in place; publish a newer version if an old release is incomplete. Local `npm.cmd run release` without the private signing key produces an unsigned development package, not a package the native updater will automatically trust.
+
+**Without the external updater:** a Load unpacked extension cannot replace its own installed files. Close toolbox/editor tabs, extract the update, replace files in the **original permanent installation folder**, and press **Reload** at `chrome://extensions`; then reload the website. ZIP downloads are reported as queued, not installed or saved. With the explicitly installed Windows helper, signed file replacement happens outside Chrome and the extension reloads after confirmed installation. Chrome Web Store or supported managed distribution is another automatic-update route; this project does not publish signed CRXs to the store.
 
 **Saved scripts are separate:** runtime updates do not overwrite already imported userscripts, local edits, enabled states or values. To update an existing script deliberately, import the new `.user.js` into its existing editor entry, review it and press Save. Automatic `@updateURL` userscript replacement is not enabled by the GitHub release checker.
 
@@ -167,6 +179,8 @@ content/               page-world unblockers and the bridge to the extension
 popup/                 the UI          sandbox/  syntax checker (eval-capable page)
 shared/                HLS / PDF / HTTP validation, names, TS demuxer, ZIP packaging
 shared/updates.js      GitHub release metadata checks and update notices
+shared/native-updater.js constrained Native Messaging bridge and installed status
+updater/               optional Windows installer, signed updater and native host
 scripts/               scripts.json and bundled .user.js files
 plugins/               PLUGIN_PROMPT.md and (optional) folder plugins
 icons/                 vector brand and generated PNG toolbar icons
@@ -186,8 +200,15 @@ Credits to **Supreme** for ALLEN Toolbox.
 
 pdf.js © Mozilla (Apache-2.0). The GM API follows the conventions established by Greasemonkey and documented by Violentmonkey (MIT) and Tampermonkey; no code was copied from them.
 
+## License
+
+Original project code is **Copyright (c) 2026 Shaan**, under the restricted source-available terms in [LICENSE](LICENSE). Personal use of official releases is permitted; reuse of protected original code to improve another system or build countermeasures requires Shaan's written permission. This is **not copyleft** or an open-source license.
+
+Copyright cannot prohibit general inspiration, independently written implementations, or lawful security improvements that do not reuse protected expression. Public source can still be studied, so this license is not a technical guarantee against platform changes. Seek qualified legal review before relying on enforceability. pdf.js, CodeMirror, and other third-party material retain their own licenses and notices.
+
 ## Changelog
 
+* **2.2.0**: bundle an explicitly approved Windows installer/updater, constrained Native Messaging, signed automatic installation with rollback and fixed official source, and Shaan's restricted-source copyright notice. Downloading alone is not consent; Chrome's initial Load unpacked step remains required.
 * **2.1.3**: hard-lock updates to the official repository; remove manual URL entry and source switching; migrate legacy source settings safely; keep automatic checks enabled by default without setup.
 * **2.1.2**: deterministic ZIP ordering regardless of concurrent asset reads; authenticated draft-release discovery and verified resumable publication. The unpublished 2.1.1 tag is preserved rather than moved to different source.
 * **2.1.1**: resume server-capped byte ranges without losing or duplicating bytes; retain strict file identity/length checks and HLS validation; add configurable hourly GitHub release checks, update notifications, release ZIP downloads and tested GitHub Actions packaging. Unpacked installations still require replacing files and reloading; stored userscript edits are not overwritten.

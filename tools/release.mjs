@@ -5,6 +5,9 @@ import { createHash } from 'node:crypto';
 import { buildExtensionBundle } from '../shared/package.js';
 import { validateZipPath } from '../shared/zip.js';
 import { githubRepository, versionParts, OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { signUpdate } from './update-signing.mjs';
+
+export const WINDOWS_UPDATER_ASSETS = Object.freeze(['Install-ALLEN-Toolbox.cmd', 'updater/install.ps1', 'updater/updater.ps1', 'updater/native-host.cs', 'updater/public-key.json']);
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -16,7 +19,7 @@ async function sourceAsset(path) {
   return readFile(target);
 }
 
-export async function buildRelease({ repository = '', readAsset = sourceAsset } = {}) {
+export async function buildRelease({ repository = '', readAsset = sourceAsset, signingKey = '' } = {}) {
   const text = async (path) => { const data = await readAsset(path); return typeof data === 'string' ? data : decoder.decode(data); };
   const [manifest, pkg, index] = await Promise.all(['manifest.json', 'package.json', 'scripts/scripts.json'].map(async (path) => JSON.parse(await text(path))));
   versionParts(manifest.version);
@@ -31,9 +34,11 @@ export async function buildRelease({ repository = '', readAsset = sourceAsset } 
     const path = 'scripts/' + entry.file;
     return { path, text: await text(path) };
   }));
-  const blob = await buildExtensionBundle({ index, files }, async (path) => path === 'manifest.json' ? JSON.stringify(packagedManifest, null, 2) + '\n' : readAsset(path), packagedManifest);
-  const checksum = createHash('sha256').update(new Uint8Array(await blob.arrayBuffer())).digest('hex');
-  return { blob, checksum, version: manifest.version, tag: 'v' + manifest.version, filename: 'ALLEN-Toolbox-' + manifest.version + '.zip', repository: repo };
+  const installerFiles = await Promise.all(WINDOWS_UPDATER_ASSETS.map(async (path) => ({ path, data: await readAsset(path) })));
+  const blob = await buildExtensionBundle({ index, files }, async (path) => path === 'manifest.json' ? JSON.stringify(packagedManifest, null, 2) + '\n' : readAsset(path), packagedManifest, installerFiles);
+  const bytes = new Uint8Array(await blob.arrayBuffer()), checksum = createHash('sha256').update(bytes).digest('hex');
+  const signature = signingKey ? signUpdate(bytes, signingKey, JSON.parse(await text('updater/public-key.json'))) : null;
+  return { blob, checksum, signature, version: manifest.version, tag: 'v' + manifest.version, filename: 'ALLEN-Toolbox-' + manifest.version + '.zip', repository: repo };
 }
 
 async function main() {
@@ -44,14 +49,18 @@ async function main() {
     args.repository = argument.slice('--repository='.length);
   }
   const repository = args.repository ?? (process.env.GITHUB_REPOSITORY ? 'https://github.com/' + process.env.GITHUB_REPOSITORY : '');
-  const result = await buildRelease({ repository });
+  const signingKey = process.env.UPDATER_SIGNING_KEY || '';
+  if (process.env.GITHUB_ACTIONS === 'true' && !signingKey) throw new Error('Signed updater releases require the UPDATER_SIGNING_KEY secret');
+  const result = await buildRelease({ repository, signingKey });
   const output = resolve(root, 'dist');
   await mkdir(output, { recursive: true });
   await writeFile(resolve(output, result.filename), new Uint8Array(await result.blob.arrayBuffer()));
   await writeFile(resolve(output, result.filename + '.sha256'), result.checksum + '  ' + result.filename + '\n');
+  if (result.signature) await writeFile(resolve(output, result.filename + '.sig'), result.signature);
   console.log('Built dist/' + result.filename + ' (' + result.blob.size + ' bytes)');
   console.log(result.repository ? 'Update repository: ' + result.repository : 'No update repository configured; this ZIP is unlinked.');
   console.log('SHA-256: ' + result.checksum);
+  console.log(result.signature ? 'RSA-SHA256 updater signature generated.' : 'Unsigned local package: the native updater will refuse automatic installation of it.');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -24,7 +24,8 @@ const output = await mkdtemp(join(options['--temp'] || join(tmpdir(), 'kilo'), '
 const downloads = join(output, 'downloads'); await mkdir(downloads);
 const host = 'toolbox-fixture.allenoverseas.com', origin = 'http://' + host;
 const requests = [];
-let video = Buffer.alloc(0), failPdf = false, failVideoOnce = false, partialVideo = false;
+let video = Buffer.alloc(0), failPdf = false, failVideoOnce = false, partialVideo = false, wrongVideoStartOnce = false, noValidatorVideo = false;
+const hlsMedia = Buffer.alloc(376); hlsMedia[0] = hlsMedia[188] = 0x47;
 
 function makePdf() {
   const objects = [
@@ -62,17 +63,33 @@ const server = createServer(async (request, response) => {
   if (request.url === '/fixture.webm') {
     if (failVideoOnce) { failVideoOnce = false; response.writeHead(503, { 'Content-Type': 'text/plain' }); response.end('retry this local fixture'); return; }
     const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || '');
-    const headers = { 'Content-Type': 'video/webm', 'Accept-Ranges': 'bytes', ETag: '"toolbox-fixture-v1"' };
+    const headers = { 'Content-Type': 'video/webm', 'Accept-Ranges': 'bytes', ...(noValidatorVideo ? {} : { ETag: '"toolbox-fixture-v1"' }) };
     if (range) {
-      const start = Number(range[1]), end = Math.min(range[2] ? Number(range[2]) : video.length - 1, video.length - 1, partialVideo ? start + 128 * 1024 - 1 : video.length - 1);
+      const start = Number(range[1]), end = Math.min(range[2] ? Number(range[2]) : video.length - 1, video.length - 1, partialVideo && !noValidatorVideo ? start + 128 * 1024 - 1 : video.length - 1);
       if (start >= video.length || end < start) { response.writeHead(416, { 'Content-Range': 'bytes */' + video.length }); response.end(); return; }
       response.writeHead(206, { ...headers, 'Content-Range': 'bytes ' + start + '-' + end + '/' + video.length, 'Content-Length': end - start + 1 }); response.end(video.subarray(start, end + 1)); return;
     }
     if (partialVideo) {
-      const end = Math.min(128 * 1024 - 1, video.length - 1);
-      response.writeHead(206, { ...headers, 'Content-Range': 'bytes 0-' + end + '/' + video.length, 'Content-Length': end + 1 }); response.end(video.subarray(0, end + 1)); return;
+      const start = wrongVideoStartOnce ? 128 * 1024 : 0, end = Math.min(start + 128 * 1024 - 1, video.length - 1);
+      wrongVideoStartOnce = false;
+      response.writeHead(206, { ...headers, 'Content-Range': 'bytes ' + start + '-' + end + '/' + video.length, 'Content-Length': end - start + 1 }); response.end(video.subarray(start, end + 1)); return;
     }
     response.writeHead(200, { ...headers, 'Content-Length': video.length }); response.end(video); return;
+  }
+  if (['/ranges.m3u8', '/segments.m3u8'].includes(request.url)) {
+    const segments = request.url === '/ranges.m3u8' ? '#EXTINF:1,\n#EXT-X-BYTERANGE:188@0\nhls-media.ts\n#EXTINF:1,\n#EXT-X-BYTERANGE:188\nhls-media.ts' :
+      '#EXTINF:1,\nhls-one.ts\n#EXTINF:1,\nhls-two.ts';
+    const playlist = Buffer.from('#EXTM3U\n' + segments + '\n#EXT-X-ENDLIST\n');
+    response.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Content-Length': playlist.length }); response.end(playlist); return;
+  }
+  if (['/hls-media.ts', '/hls-one.ts', '/hls-two.ts'].includes(request.url)) {
+    const data = request.url === '/hls-media.ts' ? hlsMedia : hlsMedia.subarray(0, 188);
+    const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || ''), start = range ? Number(range[1]) : 0;
+    const end = Math.min(range?.[2] ? Number(range[2]) : data.length - 1, start + 63);
+    if (start >= data.length || end < start) { response.writeHead(416); response.end(); return; }
+    response.writeHead(206, { 'Content-Type': 'video/mp2t', ETag: '"hls-stable"',
+      'Content-Range': `bytes ${start}-${end}/${data.length}`, 'Content-Length': end - start + 1 });
+    response.end(data.subarray(start, end + 1)); return;
   }
   if (request.url === '/favicon.ico') { response.writeHead(204); response.end(); return; }
   response.writeHead(404); response.end('Local fixture not found');
@@ -364,6 +381,37 @@ try {
   await popup.locator('.card:has(.ico.media) .status.ok').first().waitFor();
   assert.ok(requests.filter((request) => request.url === '/fixture.webm' && request.headers.range).length >= 2);
 
+  for (const scenario of ['wrong-start', 'missing-validator']) {
+    const before = requests.length;
+    wrongVideoStartOnce = scenario === 'wrong-start'; noValidatorVideo = scenario === 'missing-validator';
+    finished = waitForDownload();
+    await popup.locator('.card:has(.ico.media)').first().getByRole('button', { name: 'Download', exact: true }).click();
+    download = await finished;
+    assert.equal(download.state, 'complete'); assert.deepEqual(await readFile(download.filename), video);
+    const fresh = requests.slice(before).find((request) => request.url === '/fixture.webm' && request.headers.range === 'bytes=0-');
+    assert.ok(fresh, 'Range recovery must start again from byte zero: ' + scenario);
+    assert.equal(fresh.headers['if-range'], undefined);
+    await popup.locator('.card:has(.ico.media) .status.ok').first().waitFor();
+  }
+  noValidatorVideo = false;
+  for (const path of ['/ranges.m3u8', '/segments.m3u8']) {
+    const url = origin + path;
+    await source.evaluate((url) => fetch(url).then((response) => response.text()), url);
+    await popup.waitForFunction(async ({ tabId, url }) => {
+      const state = await chrome.runtime.sendMessage({ type: 'state', tabId });
+      return state.items?.some((item) => item.kind === 'hls' && item.url === url);
+    }, { tabId, url });
+    const item = await popup.evaluate(async ({ tabId, url }) => (await chrome.runtime.sendMessage({ type: 'state', tabId })).items.find((item) => item.url === url), { tabId, url });
+    const info = await popup.evaluate((msg) => chrome.runtime.sendMessage(msg), { type: 'hls-info', tabId, id: item.id });
+    assert.equal(info.error, undefined);
+    finished = waitForDownload();
+    const started = await popup.evaluate((msg) => chrome.runtime.sendMessage(msg), { type: 'job-start', tabId, id: item.id,
+      kind: 'hls', mode: 'video', quality: info.options[0].id, name: 'Capped HLS fixture' });
+    assert.equal(started.error, undefined);
+    download = await finished;
+    assert.equal(download.state, 'complete'); assert.deepEqual(await readFile(download.filename), hlsMedia);
+  }
+
   await popup.getByRole('tab', { name: 'Scripts', exact: true }).click();
   await popup.locator('.us').first().waitFor();
   assert.equal(await popup.locator('#ai-assist').getAttribute('open'), null);
@@ -532,7 +580,7 @@ try {
   const rescanned = await recipient.evaluate(() => chrome.runtime.sendMessage({ type: 'us:bundle-export' }));
   assert.deepEqual(rescanned, imported, 'A folder rescan must not duplicate or replace the shipped scripts');
   assert.deepEqual(errors, []);
-  console.log('PASS: real MV3 startup and native toolbar-popup sizing, graphite/blue theme, animated tabs and reduced-motion support, PDF cached fallback after HTTP 403, retried/capped-range genuine WebM byte identity, native download completion, GitHub update controls with local metadata, persistent validation feedback and saved-script preservation, independent page-fix switches, blur/scroll restoration, site pause, overlay undo, reading view, playback speed, file filters, desktop/mobile UI with visible Supreme credits, protected folder Delete controls and backend rejection, native userscript file upload, concurrent GM header isolation, credited ZIP export and fresh-recipient script import/execution with private values excluded.');
+  console.log('PASS: real MV3 startup and native toolbar-popup sizing, graphite/blue theme, animated tabs and reduced-motion support, PDF cached fallback after HTTP 403, retried/capped-range genuine WebM byte identity, zero-based recovery of wrong offsets and unvalidated default prefixes, capped HLS range and whole-segment byte identity, native download completion, GitHub update controls with local metadata, persistent validation feedback and saved-script preservation, independent page-fix switches, blur/scroll restoration, site pause, overlay undo, reading view, playback speed, file filters, desktop/mobile UI with visible Supreme credits, protected folder Delete controls and backend rejection, native userscript file upload, concurrent GM header isolation, credited ZIP export and fresh-recipient script import/execution with private values excluded.');
   console.log('Artifacts: ' + output);
 } catch (error) {
   console.error('Browser test artifacts: ' + output);

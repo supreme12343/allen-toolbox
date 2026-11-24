@@ -136,6 +136,57 @@ test('HLS 200 byte-range fallback slices a complete file once instead of duplica
   assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
 });
 
+test('HLS capped byte ranges fetch contiguous remainders for initialization and media', async () => {
+  const all = joined(init, fragment, fragment), requests = [];
+  const worker = await workerHarness(async (url, opts) => {
+    if (url.endsWith('.m3u8')) return response(utf8(vod(`#EXT-X-MAP:URI="media.mp4",BYTERANGE="${init.length}@0"\n` +
+      `#EXTINF:1,\n#EXT-X-BYTERANGE:${fragment.length}@${init.length}\nmedia.mp4\n` +
+      `#EXTINF:1,\n#EXT-X-BYTERANGE:${fragment.length}\nmedia.mp4`)));
+    const m = /^bytes=(\d+)-(\d+)$/.exec(opts.headers.Range), start = +m[1], end = Math.min(+m[2], start + 6);
+    requests.push({ start, end, validator: opts.headers['If-Range'] });
+    return response(all.slice(start, end + 1), { etag: '"stable"', 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  });
+  const out = await run(worker);
+  assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
+  assert.ok(requests.length > 3);
+  assert.ok(requests.filter((r) => ![0, init.length, init.length + fragment.length].includes(r.start)).every((r) => r.validator === '"stable"'));
+  assert.equal(worker.messages.filter((m) => m.type === 'off:request-acquire').length,
+    worker.messages.filter((m) => m.type === 'off:request-release').length);
+});
+
+test('HLS ordinary segment URLs can return capped 206 responses without losing the remainder', async () => {
+  const all = ts(), requests = [];
+  const worker = await workerHarness(async (url, opts) => {
+    if (url.endsWith('.m3u8')) return response(utf8(vod('#EXTINF:1,\nseg.ts')));
+    requests.push(opts.headers.Range);
+    const m = /^bytes=(\d+)-(\d*)$/.exec(opts.headers.Range || ''), start = m ? +m[1] : 0, end = Math.min(m?.[2] ? +m[2] : all.length - 1, start + 63);
+    return response(all.slice(start, end + 1), { etag: '"stable"', 'content-range': `bytes ${start}-${end}/${all.length}` }, 206);
+  });
+  const out = await run(worker);
+  assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
+  assert.deepEqual(requests, [undefined, 'bytes=64-187', 'bytes=128-187']);
+});
+
+test('HLS capped ranges reject changed entities and unvalidated prefixes without creating output', async (t) => {
+  for (const failure of ['changed', 'missing-validator', 'wrong-start', 'changed-total', 'truncated']) await t.test(failure, async () => {
+    let requests = 0;
+    const worker = await workerHarness(async (url, opts) => {
+      if (url.endsWith('.m3u8')) return response(utf8(vod('#EXTINF:1,\n#EXT-X-BYTERANGE:188@0\nmedia.ts')));
+      const m = /^bytes=(\d+)-(\d+)$/.exec(opts.headers.Range), offset = +m[1], end = Math.min(+m[2], offset + 63);
+      requests++;
+      const start = requests > 1 && failure === 'wrong-start' ? offset - 1 : offset;
+      const total = requests > 1 && failure === 'changed-total' ? 189 : 188;
+      const body = ts().slice(offset, end + 1 - (requests > 1 && failure === 'truncated' ? 1 : 0));
+      return response(body, { ...(failure === 'missing-validator' ? {} : { etag: requests > 1 && failure === 'changed' ? '"new"' : '"stable"' }),
+        'content-range': `bytes ${start}-${end}/${total}` }, 206);
+    });
+    await assert.rejects(run(worker), (e) => ['DOWNLOAD_CHANGED', 'DOWNLOAD_RANGE', 'DOWNLOAD_PARTIAL'].includes(e.code));
+    assert.equal(worker.blobs.size, 0);
+    assert.equal(worker.messages.filter((m) => m.type === 'off:request-acquire').length,
+      worker.messages.filter((m) => m.type === 'off:request-release').length);
+  });
+});
+
 test('HLS changed range validators cannot produce partial assembled output', async () => {
   let segment = 0;
   const worker = await workerHarness(async (url, opts) => {

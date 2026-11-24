@@ -1,55 +1,32 @@
 import { readBody } from './download.js';
+import { OFFICIAL_REPOSITORY, githubRepository, githubRelease, versionParts, compareVersions } from './update-meta.js';
+import { initNativeUpdater } from './native-updater.js';
+export { OFFICIAL_REPOSITORY, githubRepository, githubRelease, versionParts, compareVersions } from './update-meta.js';
 
 export const UPDATE_ALARM = 'allen-toolbox-github-updates';
-export const OFFICIAL_REPOSITORY = 'https://github.com/supreme12343/allen-toolbox';
+export const UPDATE_RELOAD_ALARM = 'allen-toolbox-updater-reload';
 const NOTICE = 'allen-toolbox-update';
 const STORAGE = 'githubUpdates';
 const HOUR = 60 * 60 * 1000;
 
-export function githubRepository(input) {
-  const value = String(input || '').trim();
-  if (!value) return '';
-  const match = /^https:\/\/github\.com\/([a-z\d][a-z\d-]{0,38})\/([a-z\d_.-]{1,100})\/?$/i.exec(value);
-  const repo = match?.[2].replace(/\.git$/i, '');
-  if (!match || !repo || repo === '.' || repo === '..') throw new Error('Use a public repository URL: https://github.com/OWNER/REPO');
-  return 'https://github.com/' + match[1] + '/' + repo;
-}
-
-export function versionParts(value) {
-  if (typeof value !== 'string' || !/^(0|[1-9]\d*)(\.(0|[1-9]\d*)){0,3}$/.test(value)) throw new Error('Invalid extension version');
-  const parts = value.split('.').map(Number);
-  if (parts.some((n) => n > 65535) || parts.every((n) => n === 0)) throw new Error('Invalid extension version');
-  return parts;
-}
-
-export function compareVersions(a, b) {
-  const left = versionParts(a), right = versionParts(b);
-  for (let i = 0; i < 4; i++) {
-    const difference = (left[i] || 0) - (right[i] || 0);
-    if (difference) return Math.sign(difference);
-  }
-  return 0;
-}
-
-export function githubRelease(data, repository) {
-  const repo = githubRepository(repository);
-  if (!repo || !data || data.draft !== false || data.prerelease !== false || typeof data.tag_name !== 'string') throw new Error('GitHub returned invalid release metadata');
-  const tag = data.tag_name, version = tag.replace(/^v/, '');
-  versionParts(version);
-  const url = repo + '/releases/tag/' + tag;
-  if (typeof data.html_url !== 'string' || data.html_url.toLowerCase() !== url.toLowerCase()) throw new Error('The release does not belong to the configured repository');
-  const filename = 'ALLEN-Toolbox-' + version + '.zip';
-  const asset = Array.isArray(data.assets) ? data.assets.find((a) => a?.name === filename && a.state === 'uploaded') : null;
-  const downloadUrl = repo + '/releases/download/' + tag + '/' + filename;
-  if (asset && (typeof asset.browser_download_url !== 'string' || asset.browser_download_url.toLowerCase() !== downloadUrl.toLowerCase() ||
-      !Number.isSafeInteger(asset.size) || asset.size <= 0)) throw new Error('The release ZIP has an invalid download URL or size');
-  return { version, tag, url, filename, downloadUrl: asset ? asset.browser_download_url : '', size: asset?.size || 0 };
-}
-
 /** GitHub supplies metadata and ZIPs, never replacement code executed by the extension. */
 export function initUpdates({ chrome: browser = globalThis.chrome, fetch: request = globalThis.fetch,
-  now = Date.now, timeout = 20000, acquireRequest, releaseRequest } = {}) {
+  now = Date.now, timeout = 20000, acquireRequest, releaseRequest, busy = () => false, nativeUpdater } = {}) {
   const installedVersion = browser.runtime.getManifest().version;
+  const native = nativeUpdater || initNativeUpdater({ chrome: browser, busy });
+  let reloadTimer;
+  const attemptReload = async () => {
+    const result = await native.status();
+    if (result.uncertain) { await browser.alarms.create(UPDATE_RELOAD_ALARM, { delayInMinutes: 1 }); return; }
+    if (!result.requiresReload) { await browser.alarms.clear(UPDATE_RELOAD_ALARM); return; }
+    if (await busy()) { await browser.alarms.create(UPDATE_RELOAD_ALARM, { delayInMinutes: 1 }); return; }
+    await browser.alarms.clear(UPDATE_RELOAD_ALARM);
+    browser.runtime.reload();
+  };
+  const reloadLater = () => {
+    if (reloadTimer) return;
+    reloadTimer = setTimeout(() => { reloadTimer = null; attemptReload().catch(() => {}); }, 500);
+  };
   let record = { repository: OFFICIAL_REPOSITORY, automatic: true, checkedAt: 0, retryAt: 0, metadata: null, etag: '', error: '', notified: '' };
   let revision = 0, flight = null, active = null, sequence = 0, writes = Promise.resolve();
   const commit = (run) => { const next = writes.then(run); writes = next.catch(() => {}); return next; };
@@ -89,7 +66,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
     });
     await browser.notifications.clear(NOTICE).catch(() => {});
     await schedule();
-    return status();
+    return { ...status(), native: await native.status() };
   }
 
   async function check({ force = false } = {}) {
@@ -156,15 +133,20 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
         if (generation === revision) await store({ ...record, metadata, etag, error, retryAt, checkedAt: now() });
       });
       const result = status();
+      const nativeStatus = await native.refresh();
+      if (generation === revision && !error && record.automatic && result.available && nativeStatus.installed) {
+        const installed = await native.update();
+        if (installed.requiresReload || installed.uncertain) { reloadLater(); return { ...status(), native: installed, checking: false }; }
+      }
       if (generation === revision && !error && record.automatic && result.available && record.notified !== result.latest.version) {
         try {
           await browser.notifications.create(NOTICE, { type: 'basic', iconUrl: browser.runtime.getURL('icons/icon128.png'),
-            title: 'ALLEN Toolbox update available', message: 'Version ' + result.latest.version + ' is ready. Click to view the GitHub release. Unpacked installs require replacing files and reloading.' });
+            title: 'ALLEN Toolbox update available', message: 'Version ' + result.latest.version + ' is ready. The bundled Windows updater can install it after one-time setup; otherwise download the ZIP.' });
           await commit(async () => { if (generation === revision) await store({ ...record, notified: result.latest.version }); });
           if (generation !== revision) await browser.notifications.clear(NOTICE);
         } catch (failure) { /* Update availability remains visible when notifications are disabled. */ }
       }
-      return { ...status(), checking: false };
+      return { ...status(), native: await native.status(), checking: false };
     })();
     try { return await flight; } finally { flight = null; }
   }
@@ -178,14 +160,22 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
     return { downloadId, filename: result.latest.filename, queued: true };
   }
 
-  browser.alarms.onAlarm.addListener((alarm) => { if (alarm.name === UPDATE_ALARM) check().catch(() => {}); });
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === UPDATE_ALARM) check().catch(() => {});
+    if (alarm.name === UPDATE_RELOAD_ALARM) native.refresh().then(attemptReload).catch(() => {});
+  });
   browser.notifications.onClicked.addListener((id) => {
     if (id !== NOTICE) return;
     ready.then(() => { const current = status(); if (current.available) return browser.tabs.create({ url: current.latest.url }); }).catch(() => {});
   });
-  const start = () => ready.then(schedule).then(() => check()).catch(() => {});
+  const start = () => ready.then(schedule).then(() => native.refresh()).then((result) => { if (result.requiresReload || result.uncertain) reloadLater(); return check(); }).catch(() => {});
   browser.runtime.onInstalled.addListener(start);
   browser.runtime.onStartup.addListener(start);
   start();
-  return { status: async () => { await ready; return status(); }, configure, check, download };
+  return { status: async () => { await ready; return { ...status(), native: await native.status() }; }, configure, check, download,
+    isApplying: () => native.isApplying(), install: async () => {
+      const result = await native.update();
+      if (result.requiresReload || result.uncertain) reloadLater();
+      return result;
+    } };
 }

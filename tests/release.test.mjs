@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { buildRelease } from '../tools/release.mjs';
+import { buildRelease, WINDOWS_UPDATER_ASSETS } from '../tools/release.mjs';
 import { EXTENSION_ASSETS } from '../shared/package.js';
 import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const decode = (data) => new TextDecoder().decode(data);
 function fixture() {
   const data = new Map(EXTENSION_ASSETS.map((path) => [path, 'runtime: ' + path]));
+  for (const path of WINDOWS_UPDATER_ASSETS) data.set(path, 'installer: ' + path);
   data.set('manifest.json', JSON.stringify({ manifest_version: 3, name: 'ALLEN Toolbox', version: '2.1.1' }));
   data.set('package.json', JSON.stringify({ version: '2.1.1' }));
   data.set('plugins/plugins.json', '[]');
@@ -38,7 +39,9 @@ test('release ZIP embeds the real repository, retains seed identity/state and ex
   assert.equal(JSON.parse(env.data.get('manifest.json')).homepage_url, undefined);
   assert.deepEqual(JSON.parse(decode(files.get('allen-toolbox/scripts/scripts.json'))), [{ id: 'stable-seed', file: 'seed.user.js', enabled: false }]);
   assert.equal(decode(files.get('allen-toolbox/scripts/seed.user.js')), env.data.get('scripts/seed.user.js'));
-  assert.equal(files.size, EXTENSION_ASSETS.length + 2); assert.ok(files.has('allen-toolbox/shared/updates.js'));
+  assert.equal(files.size, EXTENSION_ASSETS.length + 2 + WINDOWS_UPDATER_ASSETS.length); assert.ok(files.has('allen-toolbox/shared/updates.js'));
+  assert.ok(files.has('Install-ALLEN-Toolbox.cmd')); assert.ok(files.has('updater/install.ps1'));
+  assert.ok(files.has('allen-toolbox/LICENSE'));
   assert.ok([...files.keys()].every((path) => !/\/tests\/|\/tools\/|\/\.github\/|\/\.env$|\/package\.json$/.test(path)));
   assert.ok(!env.fetched.includes('.env')); assert.ok(!env.fetched.includes('tests/extra.test.mjs'));
   assert.equal(release.checksum, createHash('sha256').update(new Uint8Array(await release.blob.arrayBuffer())).digest('hex'));

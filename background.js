@@ -20,6 +20,7 @@ const ALLEN_MATCH = '*://*.allenoverseas.com/*';
 let config = { ...DEFAULTS };
 const tabs = new Map();    // tabId -> { items: {id: item}, title }
 const jobs = new Map();    // jobId -> job
+let fileOperations = 0;
 const downloadBlobs = new Map();   // downloadId (or pending save key) -> persisted blob/save ownership
 const infoCache = new Map();       // item scope + playlist url -> { at, data }
 const previewCache = new Map();
@@ -508,6 +509,7 @@ async function withPdfContext(it, fn) {
 const revokeBlob = (blobUrl) => chrome.runtime.sendMessage({ target: 'offscreen', type: 'revoke', blobUrl }).catch(() => {});
 
 async function saveBlob(blobUrl, filename, jobId = '') {
+  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
   const pending = 'pending:' + generationId(), record = { blobUrl, filename, jobId, createdAt: Date.now() };
   let acceptedId;
   downloadBlobs.set(pending, record);
@@ -841,12 +843,14 @@ async function handle(msg, sender) {
     case 'updates:get':
     case 'updates:configure':
     case 'updates:check':
+    case 'updates:install':
     case 'updates:download': {
       if (sender.id !== chrome.runtime.id || sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('popup/popup.html')) {
         throw new Error('Only the extension update controls may send this message');
       }
       if (msg.type === 'updates:configure') return updates.configure(msg);
       if (msg.type === 'updates:check') return updates.check({ force: true });
+      if (msg.type === 'updates:install') return updates.install();
       if (msg.type === 'updates:download') return updates.download();
       return updates.status();
     }
@@ -921,13 +925,17 @@ async function pdfPrepare(msg, open) {
   }
 }
 async function pdfSave(msg) {
-  const r = await pdfPrepare(msg, false);
-  if (r.fallback) return r;
-  const downloadId = await saveBlob(r.blobUrl, r.filename);
-  const [download] = await chrome.downloads.search({ id: downloadId }).catch(() => []);
-  if (download?.state === 'interrupted') throw new Error('Chrome interrupted the PDF save (' + (download.error || 'UNKNOWN') + '). Retry Save PDF.');
-  return { filename: r.filename, captured: r.captured, message: r.message, downloadId,
-    queued: download?.state !== 'complete', state: download?.state === 'complete' ? 'done' : 'saving' };
+  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
+  fileOperations++;
+  try {
+    const r = await pdfPrepare(msg, false);
+    if (r.fallback) return r;
+    const downloadId = await saveBlob(r.blobUrl, r.filename);
+    const [download] = await chrome.downloads.search({ id: downloadId }).catch(() => []);
+    if (download?.state === 'interrupted') throw new Error('Chrome interrupted the PDF save (' + (download.error || 'UNKNOWN') + '). Retry Save PDF.');
+    return { filename: r.filename, captured: r.captured, message: r.message, downloadId,
+      queued: download?.state !== 'complete', state: download?.state === 'complete' ? 'done' : 'saving' };
+  } finally { fileOperations--; }
 }
 async function pdfOpen(msg) {
   const r = await pdfPrepare(msg, true);
@@ -977,6 +985,7 @@ async function hlsPreview(msg) {
 }
 
 async function jobStart(msg) {
+  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
   const it = findItem(msg.tabId, msg.id);
   const kind = msg.kind || (it.kind === 'media' ? 'http' : 'hls');
   if (kind !== 'http' && kind !== 'hls') throw new Error('Unsupported download kind');
@@ -998,6 +1007,7 @@ async function jobStart(msg) {
     if (!/^https?:$/.test(url.protocol)) throw new Error('This media link must be reopened as a current HTTP(S) recording');
     if (!(await chrome.permissions.contains({ origins: [url.origin + '/*'] }))) throw new DownloadError('DOWNLOAD_PERMISSION', 'Allow host access to ' + url.hostname + ' before downloading.');
   }
+  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
   const job = {
     id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     tabId: msg.tabId, itemId: msg.id, mode: output.mode, kind, state: 'running', phase: 'Starting...',
@@ -1094,11 +1104,13 @@ async function saveItem(tabId, id, opts) {
 }
 
 async function startHttpJob({ url, name, exactName, referer, tabId }) {
+  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
   const source = new URL(url);
   if (!/^https?:$/.test(source.protocol)) throw new Error('Only HTTP(S) files can be downloaded');
   if (!(await chrome.permissions.contains({ origins: [source.origin + '/*'] }))) throw new DownloadError('DOWNLOAD_PERMISSION', 'Allow host access to ' + source.hostname + ' before downloading.');
   const frame = tabs.get(tabId)?.frames?.[0] || {};
   const context = { ...frame, url: source.href, tabId, frameId: 0, referer: normRef(referer) };
+  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
   const job = {
     id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), tabId, itemId: 'gm', mode: 'video', kind: 'http',
     state: 'running', phase: 'Starting…', done: 0, total: 0, bytes: 0, message: '', filename: '', startedAt: Date.now(),
@@ -1114,7 +1126,14 @@ async function startHttpJob({ url, name, exactName, referer, tabId }) {
 }
 
 const gm = initGM({ ready, offscreen, saveBlob, setReferer, listItems, saveItem, startHttpJob, acquireRequest, releaseRequest });
-const updates = initUpdates({ acquireRequest, releaseRequest });
+const updates = initUpdates({ acquireRequest, releaseRequest, busy: async () => {
+  await ready;
+  const downloading = await chrome.downloads.search({ state: 'in_progress' }).then((items) => items.length > 0).catch(() => true);
+  if (fileOperations) return true;
+  if ([...jobs.values()].some((job) => !terminalJob(job.state))) return true;
+  if ([...requestLeases.values()].some((lease) => !lease.closed)) return true;
+  return downloading || downloadBlobs.size > 0;
+} });
 
 /* ---- popup state ---- */
 async function popupState(tabId) {

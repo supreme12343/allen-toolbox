@@ -26,7 +26,7 @@ for (const path of files) {
     const result = spawnSync(process.execPath, ['--check', path], { encoding: 'utf8' });
     if (result.status !== 0) fail(relative(root, path) + '\n' + result.stderr);
     const source = await readFile(path, 'utf8');
-    for (const match of source.matchAll(/(?:from\s*|import\s*)['"](\.[^'"]+)['"]/g)) await requireAsset(resolve(dirname(path), match[1]), relative(root, path));
+    for (const match of source.matchAll(/^\s*import\s+(?:[^;\n]*?\sfrom\s*)?['"](\.[^'"]+)['"]/gm)) await requireAsset(resolve(dirname(path), match[1]), relative(root, path));
   }
   if (path.endsWith('.json')) {
     try { JSON.parse(await readFile(path, 'utf8')); } catch (error) { fail(relative(root, path) + ': ' + error.message); }

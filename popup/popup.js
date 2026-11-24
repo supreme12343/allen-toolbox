@@ -769,12 +769,21 @@ async function refreshPerm() {
 let updateState = null;
 function renderUpdates(next) {
   if (!next) return;
-  updateState = next;
+  updateState = { ...updateState, ...next };
+  next = updateState;
   $('#updates-panel').setAttribute('aria-busy', String(next.checking));
   $('#update-auto').setAttribute('aria-checked', String(next.automatic));
   for (const id of ['update-github', 'update-auto', 'update-check']) $('#' + id).disabled = next.checking || !!$('#' + id).dataset.busy;
   $('#update-release').hidden = !next.available;
   $('#update-download').hidden = !next.available || !next.latest?.downloadUrl;
+  const native = next.native;
+  $('#update-install').hidden = !native?.installed || (!next.available && !native.requiresReload);
+  $('#update-install').disabled = !!native?.applying || next.checking || !!$('#update-install').dataset.busy;
+  const nativeFeedback = $('#native-updater-status');
+  const nativeMessage = native?.uncertain ? 'Windows updater status is unresolved. Downloads wait for a safe status recheck.' : native?.installed ? native.error ? 'Windows updater: ' + native.error : native.applying ? 'Windows updater is verifying and installing the signed release...' :
+    'Windows updater installed. Folder version: ' + native.installedVersion + (native.requiresReload ? '. Extension reload is pending.' : '. Automatic installation is ready.') :
+    'Windows updater is not installed. Run the bundled installer once and approve its setup to enable automatic installation.';
+  if (nativeFeedback.textContent !== nativeMessage) nativeFeedback.textContent = nativeMessage;
   const feedback = $('#update-status');
   feedback.className = 'status' + (next.checking ? '' : next.error ? ' err' : next.available ? ' warn' : '');
   let message = next.checking ? 'Checking GitHub for updates...' : next.error ? next.error : next.available ?
@@ -797,7 +806,14 @@ function wireUpdates() {
   wireAction($('#update-release'), () => chrome.tabs.create({ url: updateState.latest.url }));
   wireAction($('#update-download'), async () => {
     const result = await bg('updates:download');
-    status(result.filename + ' queued. After saving, replace the files in the original extension folder and reload it.', 'ok');
+    status(result.filename + ' queued. The ZIP includes the optional installer; run it explicitly for one-time Windows updater setup.', 'ok');
+  });
+  wireAction($('#update-install'), async () => {
+    $('#native-updater-status').textContent = 'Windows updater is verifying and installing the signed release...';
+    const result = await bg('updates:install');
+    renderUpdates({ ...updateState, native: result });
+    if (result.state === 'error' || !result.installed) throw new Error(result.error || 'Windows updater is unavailable');
+    status(result.state === 'deferred' ? result.error : result.requiresReload ? 'Update installed; the extension is reloading.' : 'Windows updater check complete.', result.state === 'deferred' ? 'warn' : 'ok');
   });
 }
 

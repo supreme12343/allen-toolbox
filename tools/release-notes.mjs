@@ -4,6 +4,13 @@ export function releaseNotes({ version, prerelease = false }) {
 **This is an experimental prerelease for beta testers, not the Latest stable version.**
 For normal use, stay on [ALLEN Toolbox 2.3.0](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0).
 
+${version === '2.3.2' ? `### Update Test: 2.3.1 BETA to 2.3.2 BETA
+
+This small version-bump release tests the existing updater without changing its engine, permissions, signing key or recovery bootstrap.
+
+**Already connected 2.3.1 BETA? Do not manually replace your folder first.** Open **Utilities > Built-in updater BETA setup**, click **Check for beta update**, then **Install checked beta update**. After a successful verified install and reload, the header should read **2.3.2 BETA**. If automatic file installation was opted in, it may apply the release when idle.
+
+` : ''}
 ### What We Are Testing
 
 - A browser-only updater using Chrome's folder-access permission, without a Windows installer, EXE or PowerShell helper.

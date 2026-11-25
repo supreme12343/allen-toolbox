@@ -1,6 +1,12 @@
-# ALLEN Toolbox 2.3.1 BETA
+# ALLEN Toolbox 2.3.2 BETA
 
 **Experimental prerelease for beta testers. This is not the Latest stable version.** Normal users should stay on [2.3.0 stable](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0).
+
+## 2.3.1 to 2.3.2 Update Test
+
+This is a small version-bump release for testing the existing built-in updater. No updater engine, folder permission, signing key or recovery-bootstrap changes are included.
+
+If you already connected **2.3.1 BETA**, keep that installation folder unchanged. Open **Utilities > Built-in updater BETA setup**, click **Check for beta update**, then **Install checked beta update**. Do not manually extract the new ZIP over the folder before this test. Successful installation and reload should show **2.3.2 BETA** in the header. Existing automatic-install opt-in may apply it when idle.
 
 ## Built-In Updater Beta
 
@@ -239,6 +245,7 @@ Copyright cannot prohibit general inspiration, independently written implementat
 
 ## Changelog
 
+* **2.3.2 BETA**: version-bump update-test release. Use the connected 2.3.1 BETA folder to exercise signed in-place installation and reload. Updater code, permissions, signing key and recovery bootstrap remain unchanged.
 * **2.3.1 BETA**: experimental built-in folder updater with explicit permission, signed package checks, local-edit protection, backups and standalone recovery. Separate beta branch/channel and prerelease publishing; stable 2.3.0 remains Latest. Automatic installation is opt-in, not enabled by download or Load unpacked alone.
 * **2.3.0**: remove client-side executable compilation and policy bypasses, require trusted same-publisher Windows signatures, isolate native protocol 2 with multi-client activity and cross-session locks, harden recovery and folder boundaries, and restore mandatory Windows/antivirus release validation. Standard builds remain manual-only until a trusted Windows signing certificate is configured. Include the running-version badge and validatorless capped-media compatibility fix.
 * **2.2.0**: bundle an explicitly approved Windows installer/updater, constrained Native Messaging, signed automatic installation with rollback and fixed official source, and Shaan's restricted-source copyright notice. Downloading alone is not consent; Chrome's initial Load unpacked step remains required.

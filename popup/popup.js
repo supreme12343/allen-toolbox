@@ -8,7 +8,8 @@ import { WINDOWS_UPDATER_AVAILABLE } from '../shared/native-updater-config.js';
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 
-const runningVersion = chrome.runtime.getManifest().version;
+const runningManifest = chrome.runtime.getManifest();
+const runningVersion = runningManifest.version_name || runningManifest.version;
 const versionBadge = $('#extension-version');
 versionBadge.textContent = 'v' + runningVersion;
 versionBadge.title = 'Running extension version ' + runningVersion;
@@ -785,11 +786,16 @@ function renderUpdates(next) {
   $('#update-release').hidden = !next.available;
   $('#update-download').hidden = !next.available || !next.latest?.downloadUrl;
   const native = next.native;
-  $('#update-install').hidden = !WINDOWS_UPDATER_AVAILABLE || !native?.installed || (!next.available && !native.requiresReload);
+  const folderMode = next.channel === 'beta';
+  $('#folder-updater-setup').hidden = !folderMode;
+  $('#update-install').textContent = folderMode ? 'Install verified beta update' : 'Check Windows updater';
+  $('#update-install').hidden = !(folderMode || WINDOWS_UPDATER_AVAILABLE) || !native?.installed || (!next.available && !native.requiresReload);
   $('#update-install').disabled = !!native?.applying || next.checking || !!$('#update-install').dataset.busy;
   const nativeFeedback = $('#native-updater-status');
   const nativeError = native?.error === 'browser-running' ? 'Automatic installation waits until all supported browsers are closed.' : native?.error;
-  const nativeMessage = !WINDOWS_UPDATER_AVAILABLE ? 'Automatic Windows installation is unavailable in this build. No executable installer is bundled; manual extension updates remain available.' : native?.uncertain ? 'Windows updater status is unresolved. Downloads wait for a safe status recheck.' : native?.installed ? nativeError ? 'Windows updater: ' + nativeError : native.applying ? 'Windows updater is verifying the signed release...' :
+  const nativeMessage = folderMode ? native?.uncertain ? 'BETA folder update needs recovery. Open the updater setup or Recovery page before continuing.' : native?.connected ?
+    'BETA folder updater: ' + (native.permission === 'granted' ? native.autoInstall ? 'automatic installation opted in.' : 'connected; automatic installation is off.' : 'folder permission needs approval again.') :
+    'BETA experiment: grant access to the original extension folder in updater setup. No external installer is used.' : !WINDOWS_UPDATER_AVAILABLE ? 'Automatic Windows installation is unavailable in this build. No executable installer is bundled; manual extension updates remain available.' : native?.uncertain ? 'Windows updater status is unresolved. Downloads wait for a safe status recheck.' : native?.installed ? nativeError ? 'Windows updater: ' + nativeError : native.applying ? 'Windows updater is verifying the signed release...' :
     'Signed Windows updater installed. Folder version: ' + native.installedVersion + (native.requiresReload ? '. Extension reload is pending.' : '. Installation waits until supported browsers are closed.') :
     'Windows updater is not installed. Run the bundled installer once and approve its setup to enable automatic installation.';
   if (nativeFeedback.textContent !== nativeMessage) nativeFeedback.textContent = nativeMessage;
@@ -812,6 +818,7 @@ function wireUpdates() {
     finally { $('#updates-panel').setAttribute('aria-busy', 'false'); }
   });
   wireAction($('#update-github'), () => chrome.tabs.create({ url: OFFICIAL_REPOSITORY }));
+  wireAction($('#folder-updater-setup'), () => chrome.tabs.create({ url: chrome.runtime.getURL('popup/updater.html') }));
   wireAction($('#update-release'), () => chrome.tabs.create({ url: updateState.latest.url }));
   wireAction($('#update-download'), async () => {
     const result = await bg('updates:download');

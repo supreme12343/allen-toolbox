@@ -32,10 +32,11 @@ async function workerHarness(fetch, send) {
     async sendMessage(msg) { messages.push(structuredClone(msg)); if (send) return send(msg); return msg.type === 'off:request-acquire' ? { requestId: msg.requestId } : { ok: true }; } } };
   const wrapped = Object.fromEntries(['withResponse', 'fetchBytes', 'fetchBuffer', 'fetchText', 'downloadFile'].map((name) => [name, (url, opts, consume) => download[name](url, { ...opts, fetch, retryDelay: 0 }, consume)]));
   const ctx = vm.createContext({ ...hls, ...download, ...wrapped, ...pdf, ...names, TsAudioDemuxer,
+    createFolderUpdater: (options) => ({ async getFolderUpdateState() { return { kind: 'folder', connected: false, installedVersion: options.chrome.runtime.getManifest().version }; } }),
     pdfjs: { GlobalWorkerOptions: {} }, chrome, self: { addEventListener() {} }, crypto: globalThis.crypto, URL: ObjectURL,
     Blob, Uint8Array, TextDecoder, AbortController, DOMException, setTimeout, clearTimeout, console });
   new vm.Script(source + '\n globalThis.api = { runHls, runHttp, startJob, jobs, hlsInfo, hlsPreview, handle };', { filename: 'offscreen.js' }).runInContext(ctx);
-  return { api: ctx.api, messages, blobs, revoked, listeners };
+  return { api: ctx.api, messages, blobs, revoked, listeners, chrome };
 }
 
 async function run(worker, option = single, mode = 'video', extra = {}) {
@@ -165,6 +166,15 @@ test('HLS ordinary segment URLs can return capped 206 responses without losing t
   const out = await run(worker);
   assert.deepEqual(new Uint8Array(await out.blob.arrayBuffer()), all);
   assert.deepEqual(requests, [undefined, 'bytes=64-187', 'bytes=128-187']);
+});
+
+test('offscreen folder state uses the trusted worker manifest without requiring getManifest in the document', async () => {
+  const worker = await workerHarness(async () => { throw new Error('Folder status must not fetch media'); });
+  const manifest = { name: 'ALLEN Toolbox', manifest_version: 3, version: '2.3.1', version_name: '2.3.1 BETA' };
+  assert.equal(worker.chrome.runtime.getManifest, undefined);
+  assert.equal((await worker.api.handle({ type: 'folder-state', runtimeManifest: manifest })).installedVersion, '2.3.1');
+  assert.equal((await worker.api.handle({ type: 'folder-state', runtimeManifest: { ...manifest, version: '2.3.2', version_name: '2.3.2 BETA' } })).installedVersion, '2.3.2');
+  await assert.rejects(worker.api.handle({ type: 'folder-state' }), /Trusted running manifest/);
 });
 
 test('ordinary HLS segment URLs also support validatorless capped responses without weakening playlist ranges', async () => {

@@ -7,6 +7,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { crc32, validateZipPath } from '../shared/zip.js';
 import { EXTENSION_ASSETS } from '../shared/package.js';
 import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { isBetaManifest } from '../shared/update-meta.js';
 
 const options = Object.fromEntries(process.argv.slice(2).map((argument) => {
   const index = argument.indexOf('='); return [argument.slice(0, index), argument.slice(index + 1)];
@@ -14,7 +15,8 @@ const options = Object.fromEntries(process.argv.slice(2).map((argument) => {
 const { chromium } = options['--playwright'] ? await import(pathToFileURL(options['--playwright']).href) : await import('playwright');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const fixtureRepository = OFFICIAL_REPOSITORY;
-const currentVersion = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8')).version.split('.').map(Number);
+const sourceManifest = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8')), fixtureBeta = isBetaManifest(sourceManifest);
+const currentVersion = sourceManifest.version.split('.').map(Number);
 currentVersion[currentVersion.length - 1]++;
 const fixtureVersion = currentVersion.join('.');
 const fixtureRelease = { tag_name: 'v' + fixtureVersion, html_url: fixtureRepository + '/releases/tag/v' + fixtureVersion,
@@ -109,12 +111,12 @@ async function fixtureExtension() {
     }
     if (path === 'background.js') {
       // Metadata is a local fixture too: never contact a real GitHub repository during tests.
-      const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + '/releases/latest';
+      const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + (fixtureBeta ? '/releases?per_page=30' : '/releases/latest');
       data = Buffer.from(`globalThis.fixtureNativeCalls = 0;
 chrome.runtime.sendNativeMessage = () => { globalThis.fixtureNativeCalls++; return Promise.reject(new Error('Native execution is prohibited in this browser fixture')); };
 const fixtureFetch = globalThis.fetch;
-globalThis.fetch = (input, options) => String(input) === ${JSON.stringify(api)} ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(fixtureRelease))}, { headers: { 'content-type': 'application/json' } })) : fixtureFetch(input, options);
-` + data.toString('utf8'));
+globalThis.fetch = (input, options) => String(input) === ${JSON.stringify(api)} ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(fixtureBeta ? [fixtureRelease] : fixtureRelease))}, { headers: { 'content-type': 'application/json' } })) : fixtureFetch(input, options);
+` + data.toString('utf8') + '\nglobalThis.fixtureUpdateDebug = async () => ({ ...(await updates.status()), capabilities: await offscreen("updater-capabilities") });\n');
     }
     await mkdir(dirname(target), { recursive: true }); await writeFile(target, data);
   }
@@ -165,7 +167,7 @@ async function assertActionPopup(worker, inspector, source) {
   try {
     // Action popups are not Playwright tabs: inspect the real native view without forcing its viewport.
     await inspector.waitForFunction(() => chrome.extension.getViews({ type: 'popup' }).some((view) => Number(view.document.querySelector('#count')?.dataset.count) >= 2));
-    await inspector.waitForFunction(() => chrome.extension.getViews({ type: 'popup' }).some((view) => view.innerWidth >= 448 && Math.abs(view.document.body.getBoundingClientRect().width - view.innerWidth) < 1));
+    await inspector.waitForFunction(() => chrome.extension.getViews({ type: 'popup' }).some((view) => view.innerWidth >= 440 && Math.abs(view.document.body.getBoundingClientRect().width - view.innerWidth) < 1));
     const actual = await inspector.evaluate(() => {
       const view = chrome.extension.getViews({ type: 'popup' })[0], doc = view.document;
       const lines = (node) => { const range = doc.createRange(); range.selectNodeContents(node); return range.getClientRects().length; };
@@ -176,7 +178,8 @@ async function assertActionPopup(worker, inspector, source) {
         mainHeight: main.clientHeight, overflowing: main.scrollWidth > main.clientWidth,
         footerBottom: doc.querySelector('footer').getBoundingClientRect().bottom, creditBottom: credit.bottom };
     });
-    assert.ok(actual.width >= 448 && actual.width <= 800, 'Native action popup must not collapse to min-content width: ' + JSON.stringify(actual));
+    // Windows DPI/native borders can subtract a few CSS pixels from the requested width.
+    assert.ok(actual.width >= 440 && actual.width <= 800, 'Native action popup must not collapse to min-content width: ' + JSON.stringify(actual));
     assert.equal(actual.bodyWidth, actual.width);
     assert.equal(actual.titleLines, 1); assert.ok(actual.tabLines.every((count) => count === 1));
     assert.ok(actual.fileWidth >= 260); assert.ok(actual.mainHeight >= 200); assert.equal(actual.overflowing, false);
@@ -297,7 +300,7 @@ try {
   await popup.emulateMedia({ reducedMotion: 'no-preference' });
   await popup.setViewportSize({ width: 448, height: 600 });
   await popup.goto(extensionOrigin + '/popup/popup.html?tab=' + tabId);
-  const runningVersion = await worker.evaluate(() => chrome.runtime.getManifest().version);
+  const runningVersion = await worker.evaluate(() => chrome.runtime.getManifest().version_name || chrome.runtime.getManifest().version);
   assert.equal(await popup.locator('#extension-version').textContent(), 'v' + runningVersion);
   assert.equal(await popup.locator('#extension-version').getAttribute('aria-label'), 'Running extension version ' + runningVersion);
   await popup.locator('.card:has(.ico.pdf)').first().waitFor();
@@ -341,10 +344,13 @@ try {
   const fixedSource = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'updates:get' }));
   assert.equal(fixedSource.repository, OFFICIAL_REPOSITORY);
   assert.equal(await popup.locator('#update-install').isHidden(), true, 'An unsigned helper must not be offered for installation');
-  assert.match(await popup.locator('#native-updater-status').textContent(), /unavailable|No executable installer/);
+  assert.match(await popup.locator('#native-updater-status').textContent(), fixtureBeta ? /BETA experiment|BETA folder/ : /unavailable|No executable installer/);
+  assert.equal(await popup.locator('#folder-updater-setup').isVisible(), fixtureBeta);
   await popup.waitForFunction(() => document.getElementById('update-auto').getAttribute('aria-checked') === 'true');
   await popup.locator('#update-check').click();
   await popup.locator('#update-release').waitFor({ state: 'visible' });
+  await popup.waitForFunction((version) => document.getElementById('updates-panel').getAttribute('aria-busy') === 'false' &&
+    document.getElementById('update-status').textContent.includes(version), fixtureVersion);
   assert.ok((await popup.locator('#update-status').textContent()).includes(fixtureVersion));
   assert.equal(await popup.locator('#update-download').isVisible(), true);
   const afterUpdates = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'us:bundle-export' }));
@@ -373,7 +379,12 @@ try {
 
   function waitForDownload() {
     return worker.evaluate(() => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { chrome.downloads.onChanged.removeListener(listener); reject(new Error('Browser download did not finish within 30 seconds')); }, 30000);
+      const timer = setTimeout(async () => {
+        chrome.downloads.onChanged.removeListener(listener);
+        const jobs = (await chrome.storage.session.get('jobs')).jobs?.map((job) => ({ state: job.state, phase: job.phase, message: job.message }));
+        const updater = globalThis.fixtureUpdateDebug ? await globalThis.fixtureUpdateDebug() : null;
+        reject(new Error('Browser download did not finish within 30 seconds: ' + JSON.stringify({ jobs, updater })));
+      }, 30000);
       const listener = async (event) => {
         if (!event.state || !['complete', 'interrupted'].includes(event.state.current)) return;
         clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener);

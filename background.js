@@ -10,6 +10,8 @@ import { isViewerStream, viewerStreamKey, pdfRouteHref, PdfError, PDF_REOPEN } f
 import { selectOutput } from './shared/hls.js';
 import { DownloadError } from './shared/download.js';
 import { initUpdates } from './shared/updates.js';
+import { initBuiltinUpdater } from './shared/builtin-updater.js';
+import { isBetaManifest } from './shared/update-meta.js';
 import { initGM } from './gm/gm-bg.js';
 
 const ALLEN_MATCH = '*://*.allenoverseas.com/*';
@@ -20,6 +22,7 @@ const ALLEN_MATCH = '*://*.allenoverseas.com/*';
 let config = { ...DEFAULTS };
 const tabs = new Map();    // tabId -> { items: {id: item}, title }
 const jobs = new Map();    // jobId -> job
+const queuingSaves = new Set();
 let fileOperations = 0;
 const downloadBlobs = new Map();   // downloadId (or pending save key) -> persisted blob/save ownership
 const infoCache = new Map();       // item scope + playlist url -> { at, data }
@@ -352,7 +355,8 @@ async function sendOffscreen(msg) {
 
 async function offscreen(type, payload) {
   await ensureOffscreen();
-  const r = await sendOffscreen({ target: 'offscreen', type, ...payload });
+  const r = await sendOffscreen({ target: 'offscreen', type, ...payload,
+    ...(type.startsWith('folder-') ? { runtimeManifest: chrome.runtime.getManifest() } : {}) });
   if (r && r.error) { const e = new Error(r.error); e.code = r.code; e.diag = r.diag; throw e; }
   return r;
 }
@@ -509,7 +513,12 @@ async function withPdfContext(it, fn) {
 const revokeBlob = (blobUrl) => chrome.runtime.sendMessage({ target: 'offscreen', type: 'revoke', blobUrl }).catch(() => {});
 
 async function saveBlob(blobUrl, filename, jobId = '') {
-  if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
+  fileOperations++;
+  try {
+  const allowed = updates.canSaveCompleted ? await updates.canSaveCompleted() : !updates.isApplying?.();
+  if (!allowed) { const error = new Error('The assembled download is waiting for update recovery.'); error.code = 'UPDATE_BUSY'; throw error; }
+  const selectedJob = jobs.get(jobId);
+  if (selectedJob?.cancelRequested || selectedJob?.state === 'cancelled') { const error = new Error('Download cancelled'); error.name = 'AbortError'; throw error; }
   const pending = 'pending:' + generationId(), record = { blobUrl, filename, jobId, createdAt: Date.now() };
   let acceptedId;
   downloadBlobs.set(pending, record);
@@ -532,7 +541,21 @@ async function saveBlob(blobUrl, filename, jobId = '') {
     if (downloadBlobs.has(pending)) { downloadBlobs.delete(pending); await persistDownloads().catch(() => {}); revokeBlob(blobUrl); }
     throw err;
   }
+  } finally { fileOperations--; }
 }
+
+const READY_SAVE_ALARM = 'allen-updater-ready-saves';
+function scheduleReadySaves() { return chrome.alarms?.create(READY_SAVE_ALARM, { delayInMinutes: 1 }); }
+async function resumeReadySaves() {
+  await ready;
+  const waiting = [...jobs.values()].filter((job) => job.state === 'ready' && job.pendingReady);
+  for (const job of waiting) {
+    const result = await jobUpdate(job.pendingReady);
+    if (!result.deferred) await chrome.runtime.sendMessage({ target: 'offscreen', type: 'job-ack', jobId: job.id }).catch(() => {});
+  }
+  if (!waiting.length) await chrome.alarms?.clear(READY_SAVE_ALARM);
+}
+chrome.alarms?.onAlarm.addListener((alarm) => { if (alarm.name === READY_SAVE_ALARM) resumeReadySaves().catch(() => scheduleReadySaves()); });
 
 async function finishDownload(download) {
   if (!['complete', 'interrupted'].includes(download.state)) return;
@@ -606,8 +629,8 @@ async function recoverDownloads() {
   } catch (err) {}
   for (const a of active) {
     if (a.state === 'ready' && a.result) {
-      await jobUpdate({ ...a.result, jobId: a.id, state: 'ready' });
-      await chrome.runtime.sendMessage({ target: 'offscreen', type: 'job-ack', jobId: a.id }).catch(() => {});
+      const result = await jobUpdate({ ...a.result, jobId: a.id, state: 'ready' });
+      if (!result.deferred) await chrome.runtime.sendMessage({ target: 'offscreen', type: 'job-ack', jobId: a.id }).catch(() => {});
     } else if (jobs.get(a.id)?.state === 'cancelled') toCancelWorker(a.id);
   }
   for (const j of jobs.values()) if (j.state === 'running' && !active.some((a) => a.id === j.id)) {
@@ -844,13 +867,17 @@ async function handle(msg, sender) {
     case 'updates:configure':
     case 'updates:check':
     case 'updates:install':
+    case 'folder:forget':
+    case 'folder:recover':
     case 'updates:download': {
-      if (sender.id !== chrome.runtime.id || sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('popup/popup.html')) {
+      if (sender.id !== chrome.runtime.id || !['popup/popup.html', 'popup/updater.html'].some((path) => sender.url?.split(/[?#]/)[0] === chrome.runtime.getURL(path))) {
         throw new Error('Only the extension update controls may send this message');
       }
       if (msg.type === 'updates:configure') return updates.configure(msg);
       if (msg.type === 'updates:check') return updates.check({ force: true });
       if (msg.type === 'updates:install') return updates.install();
+      if (msg.type === 'folder:forget') return folderUpdater.forget();
+      if (msg.type === 'folder:recover') return updates.recover();
       if (msg.type === 'updates:download') return updates.download();
       return updates.status();
     }
@@ -1055,12 +1082,13 @@ async function jobCancel({ jobId }) {
 
 async function jobUpdate(m) {
   const j = jobs.get(m.jobId);
+  if (j && queuingSaves.has(j.id) && m.state === 'ready') return { ok: false, deferred: true };
   if (!j || terminalJob(j.state) || j.state === 'saving') {
     if (m.blobUrl && ![...downloadBlobs.values()].some((r) => r.blobUrl === m.blobUrl)) revokeBlob(m.blobUrl);
     return { ok: true };
   }
   if (!['running', 'ready', 'error', 'cancelled'].includes(m.state)) return { ok: true };
-  j.state = m.state === 'ready' ? 'saving' : m.state;
+  j.state = m.state;
   if (m.phase) j.phase = m.phase;
   if (m.done !== undefined) { j.done = m.done; j.total = m.total; j.bytes = m.bytes; }
   if (m.speed !== undefined) j.speed = m.speed;
@@ -1074,8 +1102,18 @@ async function jobUpdate(m) {
   }
   if (m.state === 'ready') {
     j.filename = m.filename; j.bytes = m.size || j.bytes; j.phase = 'Saving file';
-    try { await saveBlob(m.blobUrl, m.filename, j.id); }
-    catch (e) { if (!terminalJob(j.state)) { j.state = 'error'; j.message = 'Chrome could not queue the save. ' + e.message + ' Retry Download.'; j.finishedAt = Date.now(); } }
+    j.pendingReady = { ...m };
+    queuingSaves.add(j.id);
+    let saveStarted = false;
+    try { await persistJobs(); saveStarted = true; await saveBlob(m.blobUrl, m.filename, j.id); delete j.pendingReady; }
+    catch (e) {
+      if (e.code === 'UPDATE_BUSY' && !terminalJob(j.state)) {
+        j.state = 'ready'; j.phase = 'Waiting for update recovery'; j.message = 'The completed file is retained. Finish or recover the folder update to save it.'; j.pendingReady = { ...m };
+        await persistJobs(); await scheduleReadySaves(); return { ok: false, deferred: true };
+      }
+      if (!saveStarted) revokeBlob(m.blobUrl);
+      if (!terminalJob(j.state)) { j.state = 'error'; j.message = 'Chrome could not queue the save. ' + e.message + ' Retry Download.'; j.finishedAt = Date.now(); }
+    } finally { queuingSaves.delete(j.id); }
   }
   if (m.state === 'error' || m.state === 'cancelled') j.finishedAt = Date.now();
   await persistJobs();
@@ -1126,14 +1164,19 @@ async function startHttpJob({ url, name, exactName, referer, tabId }) {
 }
 
 const gm = initGM({ ready, offscreen, saveBlob, setReferer, listItems, saveItem, startHttpJob, acquireRequest, releaseRequest });
-const updates = initUpdates({ acquireRequest, releaseRequest, busy: async () => {
+const updateBusy = async () => {
   await ready;
-  const downloading = await chrome.downloads.search({ state: 'in_progress' }).then((items) => items.length > 0).catch(() => true);
+  const [downloading, editing] = await Promise.all([
+    chrome.downloads.search({ state: 'in_progress' }).then((items) => items.length > 0).catch(() => true),
+    chrome.runtime.getContexts ? chrome.runtime.getContexts({ contextTypes: ['TAB'] }).then((items) => items.some((item) => item.documentUrl?.startsWith(chrome.runtime.getURL('popup/editor.html')))).catch(() => true) : false,
+  ]);
   if (fileOperations) return true;
   if ([...jobs.values()].some((job) => !terminalJob(job.state))) return true;
   if ([...requestLeases.values()].some((lease) => !lease.closed)) return true;
-  return downloading || downloadBlobs.size > 0;
-} });
+  return downloading || editing || downloadBlobs.size > 0;
+};
+const folderUpdater = initBuiltinUpdater({ offscreen, busy: updateBusy });
+const updates = initUpdates({ acquireRequest, releaseRequest, busy: updateBusy, ...(isBetaManifest(chrome.runtime.getManifest()) ? { nativeUpdater: folderUpdater } : {}) });
 
 /* ---- popup state ---- */
 async function popupState(tabId) {

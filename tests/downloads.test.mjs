@@ -91,8 +91,10 @@ async function backgroundHarness(options = {}) {
   const context = vm.createContext({ ...features, ...pdf, DownloadError: download.DownloadError, selectOutput: hls.selectOutput,
     safeBase: names.safeBase, chrome, URL, setTimeout, clearTimeout, console: { warn() {}, error() {} },
     initGM: () => ({ onJobUpdate(m, j) { gmEvents.push({ m: plain(m), j: plain(j) }); }, clearTabMenus() {}, syncAll() {} }),
-    initUpdates: () => ({ async status() { return {}; }, async configure() { return {}; }, async check() { return {}; }, async download() { return {}; } }) });
-  new vm.Script(source + '\n globalThis.api = { ready, jobs, tabs, reqHeaders, downloadBlobs, requestQueues, acquireRequest, releaseRequest, saveBlob, jobUpdate, jobCancel, withPdfContext, pdfSave, buildDiag, handle, hlsInfo, hlsPreview, jobStart };', { filename: 'background.js' }).runInContext(context);
+    isBetaManifest: () => false,
+    initBuiltinUpdater: () => ({ async status() { return {}; }, async refresh() { return {}; }, isApplying: () => false }),
+    initUpdates: () => options.updater || ({ async status() { return {}; }, async configure() { return {}; }, async check() { return {}; }, async download() { return {}; } }) });
+  new vm.Script(source + '\n globalThis.api = { ready, jobs, tabs, reqHeaders, downloadBlobs, requestQueues, acquireRequest, releaseRequest, saveBlob, jobUpdate, jobCancel, withPdfContext, pdfSave, buildDiag, handle, hlsInfo, hlsPreview, jobStart, resumeReadySaves };', { filename: 'background.js' }).runInContext(context);
   state.api = context.api; state.chrome = chrome;
   await state.api.ready;
   return state;
@@ -108,6 +110,7 @@ async function offscreenHarness(fetch) {
     async sendMessage(msg) { messages.push(plain(msg)); return msg.type === 'off:request-acquire' ? { requestId: msg.requestId } : { ok: true }; } } };
   const wrapped = Object.fromEntries(['withResponse', 'fetchBytes', 'fetchBuffer', 'fetchText', 'downloadFile'].map((name) => [name, (url, opts, consume) => download[name](url, { ...opts, fetch, retryDelay: 0 }, consume)]));
   const context = vm.createContext({ ...download, ...wrapped, ...names, ...pdf, ...hls,
+    createFolderUpdater: () => ({ async getFolderUpdateState() { return { kind: 'folder', connected: false }; } }),
     pdfjs: { GlobalWorkerOptions: {}, getDocument() { return { promise: Promise.resolve({ numPages: 1, async getMetadata() { return { info: { Title: 'Physics DPP' } }; },
       async getPage() { return { async getTextContent() { return { items: [] }; }, cleanup() {} }; }, async destroy() {} }) }; } },
     TsAudioDemuxer: class {}, chrome, self: { addEventListener() {} }, crypto: globalThis.crypto, URL: ObjectURL,
@@ -786,6 +789,41 @@ test('download tracking persists saving until Chrome complete and ignores late w
   assert.equal(j.state, 'done'); assert.ok(j.finishedAt); assert.equal(bg.session.downloadBlobs.length, 0);
   assert.ok(bg.messages.some((m) => m.type === 'revoke' && m.blobUrl === 'blob:complete'));
   await bg.api.jobUpdate({ jobId: j.id, state: 'running', done: 2 }); assert.equal(j.state, 'done');
+});
+
+test('completed offscreen bytes wait through a cold or pending folder gate without being discarded', async () => {
+  let allowed = false;
+  const bg = await backgroundHarness({ updater: { isApplying: () => true, canSaveCompleted: async () => allowed } });
+  bg.api.jobs.set('job-ready', job('job-ready'));
+  const result = { jobId: 'job-ready', state: 'ready', blobUrl: 'blob:retained-ready', filename: 'ready.mp4', size: 12 };
+  assert.equal((await bg.api.jobUpdate(result)).deferred, true);
+  assert.equal(bg.api.jobs.get('job-ready').state, 'ready'); assert.equal(bg.saves.length, 0);
+  assert.ok(!bg.messages.some((m) => m.type === 'revoke' || m.type === 'job-ack'));
+  allowed = true; await bg.api.resumeReadySaves();
+  assert.equal(bg.saves.length, 1); assert.equal(bg.api.jobs.get('job-ready').state, 'saving');
+  assert.ok(bg.messages.some((m) => m.type === 'job-ack')); assert.ok(!bg.messages.some((m) => m.type === 'revoke'));
+});
+
+test('duplicate ready messages cannot revoke or double-save a blob while updater readiness is awaited', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const bg = await backgroundHarness({ updater: { canSaveCompleted: () => gate } });
+  bg.api.jobs.set('job-ready', job('job-ready'));
+  const result = { jobId: 'job-ready', state: 'ready', blobUrl: 'blob:awaiting-admission', filename: 'ready.mp4', size: 12 };
+  const first = bg.api.jobUpdate(result); await tick();
+  assert.equal((await bg.api.jobUpdate(result)).deferred, true);
+  assert.ok(!bg.messages.some((m) => m.type === 'revoke')); assert.equal(bg.saves.length, 0);
+  release(true); await first; assert.equal(bg.saves.length, 1);
+});
+
+test('cancelling an assembled file during updater-readiness wait never starts a browser save', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const bg = await backgroundHarness({ updater: { canSaveCompleted: () => gate } });
+  bg.api.jobs.set('job-ready', job('job-ready'));
+  const pending = bg.api.jobUpdate({ jobId: 'job-ready', state: 'ready', blobUrl: 'blob:cancelled-before-admission', filename: 'ready.mp4', size: 12 });
+  await tick(); await bg.api.jobCancel({ jobId: 'job-ready' }); release(true); await pending;
+  assert.equal(bg.saves.length, 0); assert.equal(bg.api.jobs.get('job-ready').state, 'cancelled');
 });
 
 test('Chrome interruptions produce a visible terminal error with retry guidance', async () => {

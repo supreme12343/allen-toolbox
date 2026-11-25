@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { githubRepository, versionParts, compareVersions, githubRelease, initUpdates, UPDATE_ALARM, UPDATE_RELOAD_ALARM, OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { releaseIdentity } from '../shared/update-meta.js';
 
 const repository = OFFICIAL_REPOSITORY;
 const HOUR = 60 * 60 * 1000;
@@ -18,9 +19,10 @@ async function harness(options = {}) {
   let reloads = 0, reloaded;
   const reloadSignal = new Promise((resolve) => { reloaded = resolve; });
   const browser = {
-    runtime: { getManifest: () => ({ version: options.version || '2.1.1', homepage_url: options.homepage }),
+    runtime: { getManifest: () => ({ version: options.version || '2.1.1', homepage_url: options.homepage,
+      ...(options.beta ? { version_name: (options.version || '2.1.1') + ' BETA' } : {}) }),
       getURL: (path) => 'chrome-extension://fixture/' + path, onInstalled: event(), onStartup: event() },
-    storage: { local: { async get(key) { return { [key]: structuredClone(data[key]) }; }, async set(value) {
+    storage: { local: { async get(key) { if (options.beforeRead) await options.beforeRead(key); return { [key]: structuredClone(data[key]) }; }, async set(value) {
       if (options.failStorage) throw new Error('Storage unavailable');
       if (options.beforeWrite) await options.beforeWrite(value);
       Object.assign(data, structuredClone(value));
@@ -37,6 +39,7 @@ async function harness(options = {}) {
     async acquireRequest(value) { leases.push(value); if (options.acquire) return options.acquire(value); },
     async releaseRequest(id) { released.push(id); if (options.release) return options.release(id); },
   });
+  options.onApi?.(api);
   await api.status(); await tick();
   return { api, browser, data, alarms, notifications, cleared, downloads, tabs, calls, leases, released, reloadSignal, get reloads() { return reloads; }, advance(ms) { time += ms; } };
 }
@@ -236,6 +239,69 @@ test('failed settings persistence does not replace the working repository', asyn
   const env = await harness({ failStorage: true });
   await assert.rejects(env.api.configure({ repository, automatic: true }), /Storage unavailable/);
   assert.equal((await env.api.status()).repository, repository);
+});
+
+test('beta runtime selects and caches signed prereleases without affecting the stable endpoint', async () => {
+  const identity = releaseIdentity('2.3.2', true), url = repository + '/releases/download/' + identity.tag + '/';
+  const beta = { ...metadata('2.3.2'), tag_name: identity.tag, prerelease: true, html_url: repository + '/releases/tag/' + identity.tag,
+    assets: [{ name: identity.filename, browser_download_url: url + identity.filename, state: 'uploaded', size: 100 },
+      { name: identity.filename + '.sig', browser_download_url: url + identity.filename + '.sig', state: 'uploaded', size: 384 }] };
+  const env = await harness({ version: '2.3.1', beta: true, fetch: (url, opts, n) => n === 1 ? jsonResponse([beta, metadata('2.3.0')], { etag: '"beta"' }) : new Response(null, { status: 304 }) });
+  const first = await env.api.check({ force: true });
+  assert.equal(first.channel, 'beta'); assert.equal(first.latest.prerelease, true); assert.equal(first.available, true);
+  assert.equal(env.calls[0].url, 'https://api.github.com/repos/supreme12343/allen-toolbox/releases?per_page=30');
+  const cached = await env.api.check({ force: true });
+  assert.equal(cached.latest.signatureUrl, beta.assets[1].browser_download_url); assert.equal(cached.latest.signatureSize, 384);
+  assert.equal(env.calls[1].headers['If-None-Match'], '"beta"');
+  const stable = await harness(); await stable.api.check({ force: true });
+  assert.ok(stable.calls[0].url.endsWith('/releases/latest'));
+});
+
+test('a connected folder does not automatically install without its separate file-write opt-in', async () => {
+  let installs = 0;
+  const state = { kind: 'folder', installed: true, connected: true, autoInstall: false };
+  const native = { async refresh() { return state; }, async status() { return state; }, isApplying: () => false, async update() { installs++; return state; } };
+  const env = await harness({ nativeUpdater: native });
+  await env.api.configure({ automatic: true }); await env.api.check({ force: true });
+  assert.equal(installs, 0); assert.equal(env.reloads, 0);
+});
+
+test('manual installation waits for saved release restoration rather than dispatching a null release', async () => {
+  let release, api, installs = 0, selected;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const native = { async refresh() { return {}; }, async status() { return {}; }, isApplying: () => false,
+    async update(value) { installs++; selected = value; return { installed: true }; } };
+  const constructing = harness({ data: { githubUpdates: { repository, channel: 'stable', automatic: false, metadata: metadata(), checkedAt: 100 * HOUR } },
+    beforeRead: () => gate, onApi: (value) => { api = value; }, nativeUpdater: native });
+  const installing = api.install(); await tick(); assert.equal(installs, 0);
+  release(); await constructing; await installing;
+  assert.equal(installs, 1); assert.equal(selected.version, '2.1.2');
+});
+
+test('beta-to-stable promotion notifications are deduplicated by release tag, not numeric version', async () => {
+  const env = await harness({ version: '2.3.1', beta: true, data: { githubUpdates: { repository, channel: 'beta', automatic: true,
+    notified: 'v2.3.1-beta', checkedAt: 100 * HOUR } }, fetch: () => jsonResponse([metadata('2.3.1')]) });
+  const result = await env.api.check({ force: true });
+  assert.equal(result.available, true); assert.equal(result.latest.prerelease, false); assert.equal(env.notifications.length, 1);
+  assert.equal(env.data.githubUpdates.notified, 'v2.3.1');
+});
+
+test('unconfirmed folder edits and deferred recovery cannot trigger a reload', async () => {
+  const state = { kind: 'folder', installed: true, initialized: true, state: 'error', error: 'LOCAL_CHANGES', requiresReload: true };
+  const native = { async status() { return state; }, async refresh() { return state; }, isApplying: () => true,
+    async recover() { return { ...state, state: 'deferred', uncertain: true, recoveryPending: true }; } };
+  const env = await harness({ nativeUpdater: native });
+  await env.api.recover(); await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(env.reloads, 0);
+});
+
+test('a later verified folder refresh schedules rollback reload even without a newer release', async () => {
+  let state = { kind: 'folder', installed: false, initialized: true, state: 'not-connected' };
+  const native = { async status() { return state; }, async refresh() { return state; }, isApplying: () => false };
+  const env = await harness({ version: '2.3.1', beta: true, nativeUpdater: native, fetch: () => jsonResponse([metadata('2.3.0')]) });
+  state = { kind: 'folder', installed: true, initialized: true, state: 'ready', installedVersion: '2.3.0', requiresReload: true };
+  const result = await env.api.check({ force: true }); assert.equal(result.available, false);
+  await env.reloadSignal; assert.equal(env.reloads, 1);
 });
 
 test('approved native installation reloads only after a confirmed newer installed version', async () => {

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ALLEN Toolbox Recovery and Help</title>
+  <style>
+    :root { color-scheme: dark; --bg: #12151b; --panel: #191d24; --text: #edf0f5; --mute: #abb5c4; --blue: #90b3e8; --amber: #e7c08a; --line: #363d49; --control-border: #8594a8; --warning-bg: #2b251b; --warning-border: #8b7048; --font-ui: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { min-width: 0; background: var(--bg); color: var(--text); }
+    body { margin: 0; font: 16px/1.6 var(--font-ui); }
+    main { max-width: 800px; padding: 32px 24px; margin: 0 auto; }
+    h1 { margin: 0 0 12px; font-size: 30px; line-height: 1.25; font-weight: 600; letter-spacing: -.02em; }
+    h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+    p { margin: 0 0 16px; }
+    a { color: var(--blue); text-underline-offset: 3px; overflow-wrap: anywhere; }
+    button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulation; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    button, .button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; max-width: 100%; padding: 9px 14px; border: 1px solid var(--control-border); border-radius: 4px; background: var(--panel); color: var(--text); font-size: 14px; text-align: center; text-decoration: none; overflow-wrap: anywhere; }
+    button:hover:not(:disabled), .button:hover { border-color: var(--blue); }
+    button:active:not(:disabled) { background: var(--warning-bg); }
+    button:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
+    .eyebrow { color: var(--amber); font-size: 12px; font-weight: 600; letter-spacing: .04em; margin-bottom: 12px; }
+    .intro, .helper { color: var(--mute); }
+    .warning { margin: 24px 0; padding: 20px; border: 1px solid var(--warning-border); border-left: 3px solid var(--amber); border-radius: 6px; background: var(--warning-bg); }
+    .warning strong { display: block; color: var(--amber); margin-bottom: 8px; }
+    .warning p:last-child { margin-bottom: 0; }
+    .recovery-form { padding: 20px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    #recovery-status { font-weight: 600; overflow-wrap: anywhere; }
+    #recovery-details { color: var(--mute); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .actions, nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .helper { font-size: 14px; margin-top: 16px; }
+    .help { margin-top: 28px; }
+    ol { padding-left: 24px; }
+    li { padding-left: 4px; margin-bottom: 12px; }
+    .stable-link { display: inline-flex; align-items: center; min-height: 44px; }
+    footer { padding-top: 20px; margin-top: 24px; border-top: 1px solid var(--line); font-size: 12px; color: var(--mute); }
+    @media (max-width: 480px) { main { padding: 24px 16px; } .warning, .recovery-form { padding: 16px; } .actions > button, nav > .button { width: 100%; } }
+    @media (forced-colors: active) { .warning { border-color: ButtonText; } }
+  </style>
+  <script defer src="./updater-recovery.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">ALLEN Toolbox / Browser-only beta recovery</p>
+      <h1>Recovery and Help</h1>
+      <p class="intro">This page is independent of the toolbox background and other JavaScript modules. Opening it does not grant folder permission or start recovery.</p>
+    </header>
+
+    <div class="warning">
+      <strong>Stop other work before recovering.</strong>
+      <p>Finish or cancel active downloads in ALLEN Toolbox and Chrome. Use this extension folder only in this browser/profile. Recovery cannot see work in another browser/profile and must not run alongside it.</p>
+      <p>Folder updates are not atomic. Recovery can fail if the saved journal, folder ownership, permission, or original bytes are unavailable or changed. A separate known-good backup is still important. Do not move or edit the extension folder during recovery.</p>
+    </div>
+
+    <section class="recovery-form" aria-labelledby="recovery-form-title">
+      <h2 id="recovery-form-title">Saved recovery state</h2>
+      <p id="recovery-status" role="status" aria-live="polite" aria-atomic="true">Checking for a saved recovery journal...</p>
+      <p id="recovery-details">No recovery changes have been made by opening this page.</p>
+      <div class="actions">
+        <button id="reconnect-recovery" type="button" aria-describedby="recovery-permission-help" disabled>Reconnect folder permission</button>
+        <button id="recover-folder" type="button" aria-describedby="recovery-work-help" disabled>Restore previous files</button>
+        <button id="reload-extension" type="button" aria-describedby="recovery-reload-help" disabled>Reload extension</button>
+      </div>
+      <p id="recovery-permission-help" class="helper">Chrome may ask for read/write access after you click Reconnect folder permission. The saved folder must match the recovery journal; a different folder cannot be adopted during recovery.</p>
+      <p id="recovery-work-help" class="helper">Restore previous files uses the saved pre-update bytes when a matching journal and owned folder are available. Stop downloads first. It does not install another release or promise that every interruption is repairable.</p>
+      <p id="recovery-reload-help" class="helper">Reload is offered only after verified recovery finishes and the saved journal is cleared. Read the recovery result before reloading.</p>
+    </section>
+
+    <section class="help" aria-labelledby="help-title">
+      <h2 id="help-title">If recovery is unavailable</h2>
+      <ol>
+        <li>Keep all browsers and profiles that use this folder idle. Do not delete the saved extension data or replace files while recovery is running.</li>
+        <li>Reconnect permission only with the button above. If a recovery journal is available, restore the previous files and read the result.</li>
+        <li>If recovery cannot complete, retain the original folder location and restore a separate known-good backup manually. Check the files before reloading at Chrome's extension management page.</li>
+      </ol>
+      <a class="stable-link" href="https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0" target="_blank" rel="noopener noreferrer">Official stable 2.3.0 release</a>
+      <p class="helper">This browser-only recovery page does not use a Store installer, executable, PowerShell, or Windows helper.</p>
+    </section>
+    <nav aria-label="Return to the toolbox">
+      <a class="button" href="./updater.html">Back to folder setup</a>
+      <a class="button" href="./popup.html?dashboard=1&amp;view=tools">Back to Utilities</a>
+    </nav>
+    <noscript><p class="warning">JavaScript is required to inspect and restore the saved recovery journal. No folder permission has been requested.</p></noscript>
+    <footer>ALLEN Toolbox. Credits to <strong>Supreme</strong>.</footer>
+  </main>
+</body>
+</html>

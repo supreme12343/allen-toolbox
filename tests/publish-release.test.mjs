@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { publishRelease } from '../tools/publish-release.mjs';
-import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { OFFICIAL_REPOSITORY, releaseIdentity } from '../shared/update-meta.js';
 
 const repository = OFFICIAL_REPOSITORY, commit = 'a'.repeat(40);
 const hash = (data) => createHash('sha256').update(data).digest('hex');
@@ -13,9 +13,10 @@ const checksumText = checksum + '  ' + filename + '\n';
 const expected = [{ name: filename, size: archive.length, digest: 'sha256:' + checksum, state: 'uploaded' },
   { name: filename + '.sha256', size: Buffer.byteLength(checksumText), digest: 'sha256:' + hash(checksumText), state: 'uploaded' },
   { name: filename + '.sig', size: signature.length, digest: 'sha256:' + hash(signature), state: 'uploaded' }];
-const draft = (assets = []) => ({ tag_name: release.tag, draft: true, prerelease: false, assets: structuredClone(assets) });
+const draft = (assets = [], identity = release) => ({ tag_name: identity.tag, draft: true, prerelease: identity.prerelease === true, assets: structuredClone(assets) });
 
 function fixture(options = {}) {
+  const current = options.release || release, assets = options.assets || expected;
   const calls = [], env = { tag: options.tag || '', state: options.state ? structuredClone(options.state) : null };
   let localTag = '', failed = false;
   env.run = async (command, args) => {
@@ -24,7 +25,7 @@ function fixture(options = {}) {
       if (args[0] === 'ls-remote') {
         if (options.failRefs) throw Object.assign(new Error('Cannot reach origin'), { code: 128 });
         if (!env.tag) throw Object.assign(new Error('No tag'), { code: 2 });
-        return env.tag + '\trefs/tags/' + release.tag + '\n';
+        return env.tag + '\trefs/tags/' + current.tag + '\n';
       }
       if (args[0] === 'tag') localTag = args[2];
       if (args[0] === 'push') env.tag = localTag;
@@ -38,21 +39,21 @@ function fixture(options = {}) {
     const operation = args[1];
     if (operation === 'create') {
       if (options.failCreate && !failed) { failed = true; throw new Error('API temporarily unavailable'); }
-      assert.ok(args.includes('--draft')); env.state = draft();
+      assert.ok(args.includes('--draft')); env.state = draft([], current);
     }
     if (operation === 'upload') {
       assert.equal(env.state.draft, true, 'Uploads must remain private');
       const name = args[3].slice('dist/'.length);
       if (options.failUpload === name && !failed) { failed = true; throw new Error('Upload interrupted'); }
-      env.state.assets.push(structuredClone(expected.find((asset) => asset.name === name)));
+      env.state.assets.push(structuredClone(assets.find((asset) => asset.name === name)));
     }
     if (operation === 'edit') {
-      assert.deepEqual(env.state.assets, expected, 'Do not publish an incomplete release');
+      assert.deepEqual(env.state.assets, assets, 'Do not publish an incomplete release');
       assert.ok(args.includes('--draft=false')); env.state.draft = false;
     }
     return '';
   };
-  env.publish = () => publishRelease({ repository, commit, release, run: env.run, verifyPublished: async () => options.invalidPublished ? false : true });
+  env.publish = () => publishRelease({ repository, commit, release: current, run: env.run, verifyPublished: async () => options.invalidPublished ? false : true });
   env.calls = calls;
   return env;
 }
@@ -63,6 +64,20 @@ test('publication creates an immutable tag, uploads privately and publishes only
   assert.deepEqual(env.state.assets, expected);
   assert.equal(env.calls.filter((call) => call.command === 'git' && call.args[0] === 'push').length, 1);
   assert.ok(!env.calls.some((call) => call.args.includes('--force') || call.args.includes('--clobber')));
+});
+
+test('BETA publication is explicitly prerelease and never marks itself Latest', async () => {
+  const beta = { ...release, ...releaseIdentity('2.3.1', true), notes: 'Experimental prerelease for beta testers.' };
+  const text = checksum + '  ' + beta.filename + '\n';
+  const assets = [{ ...expected[0], name: beta.filename }, { ...expected[1], name: beta.filename + '.sha256', size: Buffer.byteLength(text), digest: 'sha256:' + hash(text) },
+    { ...expected[2], name: beta.filename + '.sig' }];
+  const env = fixture({ release: beta, assets });
+  assert.equal((await env.publish()).published, true); assert.equal(env.state.prerelease, true);
+  for (const operation of ['create', 'edit']) {
+    const args = env.calls.find((call) => call.command === 'gh' && call.args[1] === operation).args;
+    assert.ok(args.includes('--prerelease')); assert.ok(args.includes('--latest=false')); assert.ok(!args.includes('--latest'));
+  }
+  assert.ok(env.calls.find((call) => call.args[1] === 'create').args.includes('--notes-file'));
 });
 
 test('a tag push followed by failed draft creation can resume the same commit without changing the tag', async () => {

@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "ALLEN Toolbox",
-  "version": "2.3.0",
+  "version": "2.3.1",
+  "version_name": "2.3.1 BETA",
   "homepage_url": "https://github.com/supreme12343/allen-toolbox",
   "description": "Local study tools: page fixes, PDF/video downloads, utilities and portable userscripts. Credits to Supreme.",
-  "minimum_chrome_version": "120",
+  "minimum_chrome_version": "122",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -27,7 +28,6 @@
     "activeTab",
     "storage",
     "alarms",
-    "nativeMessaging",
     "downloads",
     "offscreen",
     "scripting",
@@ -40,7 +40,10 @@
   ],
   "host_permissions": [
     "*://*.allenoverseas.com/*",
-    "https://api.github.com/*"
+    "https://api.github.com/*",
+    "https://github.com/*",
+    "https://objects.githubusercontent.com/*",
+    "https://release-assets.githubusercontent.com/*"
   ],
   "optional_host_permissions": [
     "<all_urls>"

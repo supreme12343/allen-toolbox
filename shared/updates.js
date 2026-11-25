@@ -1,5 +1,5 @@
 import { readBody } from './download.js';
-import { OFFICIAL_REPOSITORY, githubRepository, githubRelease, versionParts, compareVersions } from './update-meta.js';
+import { OFFICIAL_REPOSITORY, githubRepository, githubRelease, selectGithubRelease, versionParts, compareVersions, isBetaManifest, isNewerRelease } from './update-meta.js';
 import { initNativeUpdater } from './native-updater.js';
 import { WINDOWS_UPDATER_AVAILABLE, WINDOWS_UPDATER_PUBLISHER } from './native-updater-config.js';
 export { OFFICIAL_REPOSITORY, githubRepository, githubRelease, versionParts, compareVersions } from './update-meta.js';
@@ -10,15 +10,18 @@ const NOTICE = 'allen-toolbox-update';
 const STORAGE = 'githubUpdates';
 const HOUR = 60 * 60 * 1000;
 
-/** GitHub supplies metadata and ZIPs, never replacement code executed by the extension. */
+/** Release checks stay metadata-only unless an explicitly enabled updater applies a verified package. */
 export function initUpdates({ chrome: browser = globalThis.chrome, fetch: request = globalThis.fetch,
   now = Date.now, timeout = 20000, acquireRequest, releaseRequest, busy = () => false, nativeUpdater } = {}) {
   const installedVersion = browser.runtime.getManifest().version;
+  const manifest = browser.runtime.getManifest(), beta = isBetaManifest(manifest);
+  const releaseOptions = { allowPrerelease: beta };
   const native = nativeUpdater || initNativeUpdater({ chrome: browser, busy, enabled: WINDOWS_UPDATER_AVAILABLE, publisherThumbprint: WINDOWS_UPDATER_PUBLISHER });
   let reloadTimer;
   const attemptReload = async () => {
     const result = await native.status();
-    if (result.uncertain) { await browser.alarms.create(UPDATE_RELOAD_ALARM, { delayInMinutes: 1 }); return; }
+    if (result.uncertain || result.recoveryPending) { await browser.alarms.create(UPDATE_RELOAD_ALARM, { delayInMinutes: 1 }); return; }
+    if (result.kind === 'folder' && (result.error || !['ready', 'updated'].includes(result.state))) return;
     if (!result.requiresReload) { await browser.alarms.clear(UPDATE_RELOAD_ALARM); return; }
     if (await busy()) { await browser.alarms.create(UPDATE_RELOAD_ALARM, { delayInMinutes: 1 }); return; }
     await browser.alarms.clear(UPDATE_RELOAD_ALARM);
@@ -28,26 +31,26 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
     if (reloadTimer) return;
     reloadTimer = setTimeout(() => { reloadTimer = null; attemptReload().catch(() => {}); }, 500);
   };
-  let record = { repository: OFFICIAL_REPOSITORY, automatic: true, checkedAt: 0, retryAt: 0, metadata: null, etag: '', error: '', notified: '' };
+  let record = { repository: OFFICIAL_REPOSITORY, channel: beta ? 'beta' : 'stable', automatic: true, checkedAt: 0, retryAt: 0, metadata: null, etag: '', error: '', notified: '' };
   let revision = 0, flight = null, active = null, sequence = 0, writes = Promise.resolve();
   const commit = (run) => { const next = writes.then(run); writes = next.catch(() => {}); return next; };
   const store = async (next) => { await browser.storage.local.set({ [STORAGE]: next }); record = next; };
   const ready = browser.storage.local.get(STORAGE).then(async (saved) => {
     const value = saved[STORAGE];
     if (!value || typeof value !== 'object') return;
-    const sameSource = value.repository === OFFICIAL_REPOSITORY;
-    record = { ...record, ...value, repository: OFFICIAL_REPOSITORY, automatic: value.automatic !== false };
+    const sameSource = value.repository === OFFICIAL_REPOSITORY && (value.channel || 'stable') === record.channel;
+    record = { ...record, ...value, repository: OFFICIAL_REPOSITORY, channel: beta ? 'beta' : 'stable', automatic: value.automatic !== false };
     if (!sameSource) Object.assign(record, { metadata: null, etag: '', checkedAt: 0, retryAt: 0, notified: '', error: '' });
-    try { if (record.metadata) githubRelease(record.metadata, OFFICIAL_REPOSITORY); }
+    try { if (record.metadata) githubRelease(record.metadata, OFFICIAL_REPOSITORY, releaseOptions); }
     catch (error) { Object.assign(record, { metadata: null, etag: '', checkedAt: 0, retryAt: 0, error: 'Saved release metadata was invalid and will be refreshed.' }); }
     if (!sameSource) await store(record);
   }).catch(() => { record.error = 'Update settings could not be restored.'; });
 
   function status() {
     let latest = null;
-    try { if (record.metadata) latest = githubRelease(record.metadata, record.repository); } catch (error) {}
-    return { repository: record.repository, automatic: record.automatic, installedVersion, latest,
-      available: !!latest && compareVersions(latest.version, installedVersion) > 0,
+    try { if (record.metadata) latest = githubRelease(record.metadata, record.repository, releaseOptions); } catch (error) {}
+    return { repository: record.repository, channel: record.channel, automatic: record.automatic, installedVersion, versionName: manifest.version_name || installedVersion, latest,
+      available: !!latest && isNewerRelease(latest, manifest),
       checkedAt: record.checkedAt || 0, error: record.error || '', checking: !!flight };
   }
 
@@ -86,7 +89,7 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
       const timer = setTimeout(() => controller.abort(), timeout);
       let metadata = snapshot.metadata, etag = snapshot.etag, error = '', retryAt = 0, response;
       try {
-        const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + '/releases/latest';
+        const api = 'https://api.github.com/repos/' + OFFICIAL_REPOSITORY.slice('https://github.com/'.length) + (beta ? '/releases?per_page=30' : '/releases/latest');
         // Join the same request queue as GM requests, with no captured headers or credentials.
         if (acquireRequest) {
           const acquiring = Promise.resolve(acquireRequest({ url: api, requestId, requestHeaders: [] }));
@@ -114,9 +117,10 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
           const body = await readBody(response, { signal: controller.signal, maxBytes: 512 * 1024, idleTimeout: timeout });
           let data;
           try { data = JSON.parse(await body.blob.text()); } catch (error) { throw new Error('GitHub returned invalid release metadata'); }
-          const latest = githubRelease(data, snapshot.repository);
-          metadata = { tag_name: latest.tag, html_url: latest.url, draft: false, prerelease: false,
+          const latest = selectGithubRelease(data, snapshot.repository, releaseOptions);
+          metadata = { tag_name: latest.tag, html_url: latest.url, draft: false, prerelease: latest.prerelease,
             assets: latest.downloadUrl ? [{ name: latest.filename, browser_download_url: latest.downloadUrl, state: 'uploaded', size: latest.size }] : [] };
+          if (latest.signatureUrl) metadata.assets.push({ name: latest.filename + '.sig', browser_download_url: latest.signatureUrl, state: 'uploaded', size: latest.signatureSize });
           etag = response.headers.get('etag') || '';
         }
       } catch (failure) {
@@ -135,15 +139,16 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
       });
       const result = status();
       const nativeStatus = await native.refresh({ force });
-      if (generation === revision && !error && record.automatic && result.available && nativeStatus.installed) {
-        const installed = await native.update();
+      if (nativeStatus.requiresReload || nativeStatus.uncertain || nativeStatus.recoveryPending) reloadLater();
+      if (generation === revision && !error && record.automatic && result.available && nativeStatus.installed && (nativeStatus.kind !== 'folder' || nativeStatus.autoInstall === true)) {
+        const installed = await native.update(result.latest);
         if (installed.requiresReload || installed.uncertain) { reloadLater(); return { ...status(), native: installed, checking: false }; }
       }
-      if (generation === revision && !error && record.automatic && result.available && record.notified !== result.latest.version) {
+      if (generation === revision && !error && record.automatic && result.available && record.notified !== result.latest.tag) {
         try {
           await browser.notifications.create(NOTICE, { type: 'basic', iconUrl: browser.runtime.getURL('icons/icon128.png'),
-            title: 'ALLEN Toolbox update available', message: 'Version ' + result.latest.version + ' is ready. The bundled Windows updater can install it after one-time setup; otherwise download the ZIP.' });
-          await commit(async () => { if (generation === revision) await store({ ...record, notified: result.latest.version }); });
+            title: 'ALLEN Toolbox update available', message: 'Version ' + result.latest.version + (result.latest.prerelease ? ' BETA' : '') + ' is ready. Open Utilities to review the release and update options.' });
+          await commit(async () => { if (generation === revision) await store({ ...record, notified: result.latest.tag }); });
           if (generation !== revision) await browser.notifications.clear(NOTICE);
         } catch (failure) { /* Update availability remains visible when notifications are disabled. */ }
       }
@@ -175,8 +180,21 @@ export function initUpdates({ chrome: browser = globalThis.chrome, fetch: reques
   start();
   return { status: async () => { await ready; return { ...status(), native: await native.status() }; }, configure, check, download,
     isApplying: () => native.isApplying(), install: async () => {
-      const result = await native.update();
+      await ready; await writes;
+      const selected = status().latest;
+      if (!selected) throw new Error('Check an official release before requesting installation');
+      const result = await native.update(selected);
       if (result.requiresReload || result.uncertain) reloadLater();
       return result;
+    }, recover: async () => {
+      await ready; await writes;
+      if (!native.recover) throw new Error('This build has no browser folder recovery backend');
+      const result = await native.recover();
+      if (result.requiresReload || result.uncertain || result.recoveryPending) reloadLater();
+      return result;
+    }, canSaveCompleted: async () => {
+      let result = await native.status();
+      if (result.kind === 'folder' && !result.initialized) result = await native.refresh();
+      return !(result.applying || result.uncertain || result.recoveryPending || result.kind === 'folder' && !result.initialized);
     } };
 }

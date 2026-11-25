@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { restoreRelease } from '../tools/restore-release.mjs';
 
 const commit = 'a'.repeat(40);
-function fixture(artifacts = []) {
+function fixture(artifacts = [], branch = 'main') {
   const calls = [];
   return { calls, run: async (args) => {
     calls.push(args);
     if (args[0] !== 'api') return '';
-    return JSON.stringify(args[1].endsWith('/artifacts') ? { artifacts } : { head_sha: commit, head_branch: 'main' });
+    return JSON.stringify(args[1].endsWith('/artifacts') ? { artifacts } : { head_sha: commit, head_branch: branch });
   } };
 }
 test('fresh builds do not download nonexistent artifacts or skip signing work', async () => {
@@ -26,4 +26,11 @@ test('foreign, ambiguous and expired artifacts cannot silently replace the teste
   const expired = fixture([{ name: 'allen-toolbox-package', expired: true, workflow_run: { head_sha: commit } }]);
   assert.equal(await restoreRelease({ runId: '123', commit, run: expired.run }), false);
   await assert.rejects(restoreRelease({ runId: '../other', commit, run: fixture().run }), /Invalid workflow identity/);
+});
+
+test('beta artifact recovery stays bound to its exact beta branch and commit', async () => {
+  const branch = 'beta/builtin-updater', artifacts = [{ name: 'allen-toolbox-package', expired: false, workflow_run: { head_sha: commit } }];
+  const env = fixture(artifacts, branch);
+  assert.equal(await restoreRelease({ runId: '123', commit, branch, run: env.run }), true);
+  await assert.rejects(restoreRelease({ runId: '123', commit, branch: 'main', run: fixture(artifacts, branch).run }), /publishing-branch commit/);
 });

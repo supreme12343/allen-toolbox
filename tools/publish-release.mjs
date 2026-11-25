@@ -5,9 +5,10 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildRelease } from './release.mjs';
-import { githubRepository, versionParts, OFFICIAL_REPOSITORY } from '../shared/updates.js';
+import { githubRepository, versionParts, OFFICIAL_REPOSITORY, releaseIdentity } from '../shared/update-meta.js';
 import { readBody } from '../shared/download.js';
 import { verifyUpdate } from './update-signing.mjs';
+import { assertPackageIdentity } from './package-identity.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hash = (data) => createHash('sha256').update(data).digest('hex');
@@ -15,7 +16,9 @@ const execute = async (command, args) => (await promisify(execFile)(command, arg
 
 export async function verifyPublishedAssets(state, repository, fetcher = fetch) {
   const verification = JSON.parse(await readFile(resolve(root, 'updater/public-key.json'), 'utf8'));
-  const filename = 'ALLEN-Toolbox-' + state.tag_name.replace(/^v/, '') + '.zip';
+  const match = /^v([\d.]+)(-beta)?$/.exec(state.tag_name);
+  if (!match) throw new Error('Invalid published release tag');
+  const identity = releaseIdentity(match[1], Boolean(match[2])), { filename } = identity;
   const files = [filename, filename + '.sig', filename + '.sha256'];
   const data = [];
   for (const name of files) {
@@ -32,13 +35,15 @@ export async function verifyPublishedAssets(state, repository, fetcher = fetch) 
     } finally { clearTimeout(timer); }
   }
   if (!verifyUpdate(data[0], data[1], verification) || new TextDecoder().decode(data[2]) !== hash(data[0]) + '  ' + filename + '\n') throw new Error('Published release signature or checksum is invalid');
+  assertPackageIdentity(data[0], identity);
   return true;
 }
 
 export async function publishRelease({ repository, commit, release, run = execute, verifyPublished = verifyPublishedAssets }) {
   const repo = githubRepository(repository), slug = repo.slice('https://github.com/'.length);
   versionParts(release.version);
-  if (repo !== OFFICIAL_REPOSITORY || release.repository !== repo || release.tag !== 'v' + release.version || release.filename !== 'ALLEN-Toolbox-' + release.version + '.zip' ||
+  const identity = releaseIdentity(release.version, release.prerelease === true);
+  if (repo !== OFFICIAL_REPOSITORY || release.repository !== repo || release.tag !== identity.tag || release.filename !== identity.filename ||
       !/^[a-f\d]{64}$/.test(release.checksum) || !Number.isSafeInteger(release.blob?.size) || release.blob.size <= 0 ||
       !(release.signature instanceof Uint8Array) || release.signature.length < 256 || release.signature.length > 512 ||
       !/^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(commit)) throw new Error('Invalid release publication identity');
@@ -60,7 +65,7 @@ export async function publishRelease({ repository, commit, release, run = execut
       releaseId = target.databaseId;
     }
     const data = JSON.parse(await run('gh', ['api', 'repos/' + slug + '/releases/' + releaseId]));
-    if (data.tag_name !== release.tag || !Array.isArray(data.assets) || typeof data.draft !== 'boolean' || data.prerelease !== false) throw new Error('GitHub returned an invalid or prerelease publication');
+    if (data.tag_name !== release.tag || !Array.isArray(data.assets) || typeof data.draft !== 'boolean' || data.prerelease !== identity.prerelease) throw new Error('GitHub returned an invalid release publication or channel');
     if (data.draft && data.assets.some((asset) => !expected.some((file) => file.name === asset.name))) throw new Error('The draft contains unexpected assets; it was not published');
     return data;
   };
@@ -82,7 +87,8 @@ export async function publishRelease({ repository, commit, release, run = execut
     await run('git', ['tag', release.tag, commit]);
     await run('git', ['push', 'origin', ref]);
   }
-  if (!state) await run('gh', ['release', 'create', release.tag, '--repo', slug, '--verify-tag', '--draft', '--title', 'ALLEN Toolbox ' + release.version, '--generate-notes']);
+  if (!state) await run('gh', ['release', 'create', release.tag, '--repo', slug, '--verify-tag', '--draft', '--title', identity.title,
+    ...(release.notes ? ['--notes-file', 'dist/RELEASE_NOTES.md'] : ['--generate-notes']), ...(identity.prerelease ? ['--prerelease', '--latest=false'] : [])]);
 
   // Keep incomplete uploads private. Reruns may add missing draft assets, never replace them.
   for (const file of expected) {
@@ -95,20 +101,23 @@ export async function publishRelease({ repository, commit, release, run = execut
   }
   state = await readRelease();
   if (!state || !expected.every((file) => matches(state.assets.find((asset) => asset.name === file.name), file))) throw new Error('Release assets are not complete or their hashes differ; publication was refused');
-  if (state.draft) await run('gh', ['release', 'edit', release.tag, '--repo', slug, '--draft=false', '--latest']);
+  if (state.draft) await run('gh', ['release', 'edit', release.tag, '--repo', slug, '--draft=false', ...(identity.prerelease ? ['--prerelease', '--latest=false'] : ['--latest'])]);
   return { published: true, tag: release.tag };
 }
 
 async function main() {
-  if (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('Publication runs only in the main-branch GitHub Actions workflow');
+  if (process.env.GITHUB_ACTIONS !== 'true') throw new Error('Publication runs only in GitHub Actions');
   const repository = githubRepository('https://github.com/' + process.env.GITHUB_REPOSITORY);
   if (!process.env.UPDATER_SIGNING_KEY) throw new Error('Signed updater publication requires UPDATER_SIGNING_KEY');
   const release = await buildRelease({ repository, signingKey: process.env.UPDATER_SIGNING_KEY, nativeDirectory: process.env.WINDOWS_UPDATER_DIR || '' });
+  const expectedBranch = release.prerelease ? 'refs/heads/beta/builtin-updater' : 'refs/heads/main';
+  if (process.env.GITHUB_REF !== expectedBranch) throw new Error('Release channel does not match the publishing branch');
   const archive = await readFile(resolve(root, 'dist', release.filename));
   const checksum = await readFile(resolve(root, 'dist', release.filename + '.sha256'), 'utf8');
   const signature = await readFile(resolve(root, 'dist', release.filename + '.sig'));
   if (hash(archive) !== release.checksum || archive.length !== release.blob.size || checksum !== release.checksum + '  ' + release.filename + '\n') throw new Error('The built files do not match the tested source package');
   if (!signature.equals(release.signature)) throw new Error('The built updater signature does not match the tested source package');
+  if ((await readFile(resolve(root, 'dist/RELEASE_NOTES.md'), 'utf8')) !== release.notes) throw new Error('Release notes differ from the tested release description');
   const result = await publishRelease({ repository, commit: process.env.GITHUB_SHA, release });
   console.log(result.skipped ? 'Published version already exists; no release was modified: ' + result.tag : 'Published complete release: ' + result.tag);
 }

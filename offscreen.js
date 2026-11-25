@@ -31,6 +31,7 @@ self.addEventListener('unhandledrejection', (e) => logUp('unhandled rejection: '
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.target !== 'offscreen' || sender.id !== chrome.runtime.id) return;
+  if (msg.type?.startsWith('folder-') && (sender.tab || sender.url && sender.url !== chrome.runtime.getURL('background.js'))) return;
   if (sender.tab) {
     if (!['pdf-chunk', 'pdf-cancel'].includes(msg.type)) return;
     const prefix = sender.tab.id + ':' + (sender.frameId || 0) + ':' + (sender.documentId ? sender.documentId + ':' : '');
@@ -43,6 +44,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function handle(msg) {
   switch (msg.type) {
     case 'ping': return { ok: true };
+    case 'updater-capabilities': return { manifest: typeof chrome.runtime.getManifest, url: typeof chrome.runtime.getURL,
+      crypto: typeof crypto.subtle, uuid: typeof crypto.randomUUID, database: typeof indexedDB.open, locks: typeof navigator.locks?.request, secure: isSecureContext };
+    case 'folder-state': return getFolderCore(msg).getFolderUpdateState();
+    case 'folder-install': return getFolderCore(msg).applyFolderRelease(msg.release);
+    case 'folder-recover': return getFolderCore(msg).recoverFolder();
+    case 'folder-forget': return getFolderCore(msg).forgetFolder();
     case 'pdf-chunk': return pdfChunk(msg);
     case 'pdf-cancel': {
       const key = msg.scope + '\n' + msg.uploadId;
@@ -67,7 +74,7 @@ async function handle(msg) {
 /* ====================================================================== *
  * Shared fetch helpers
  * ====================================================================== */
-function requestContext(context) {
+function requestContext(context, { plain = false } = {}) {
   return {
     acquire(url, signal) {
       checkAbort(signal);
@@ -78,7 +85,8 @@ function requestContext(context) {
           reject(signal.reason instanceof Error ? signal.reason : new DOMException('Cancelled', 'AbortError'));
         };
         signal.addEventListener('abort', cancel, { once: true });
-        chrome.runtime.sendMessage({ type: 'off:request-acquire', requestId, url, context }).then((r) => {
+        chrome.runtime.sendMessage({ type: 'off:request-acquire', requestId, url, context,
+          ...(plain ? { method: 'get', requestHeaders: [] } : {}) }).then((r) => {
           signal.removeEventListener('abort', cancel);
           if (signal.aborted) { toBackground({ type: 'off:request-release', requestId }, true); return; }
           if (!r || r.error || r.requestId !== requestId) {
@@ -94,8 +102,25 @@ function requestContext(context) {
         });
       });
     },
-    release(requestId) { return toBackground({ type: 'off:request-release', requestId }, true); },
+    async release(requestId) {
+      const result = await toBackground({ type: 'off:request-release', requestId }, true);
+      if (plain && !result?.ok) throw new Error('The update request isolation could not be released safely');
+      return result;
+    },
   };
+}
+let folderCore, folderRuntimeKey;
+function getFolderCore(msg) {
+  const manifest = msg.runtimeManifest;
+  if (!manifest || manifest.name !== 'ALLEN Toolbox' || manifest.manifest_version !== 3 || typeof manifest.version !== 'string') throw new Error('Trusted running manifest is required for folder updates');
+  const key = manifest.version + '|' + (manifest.version_name || '');
+  if (!folderCore || key !== folderRuntimeKey) {
+    // Offscreen documents support runtime messaging/getURL, but not getManifest.
+    folderCore = createFolderUpdater({ chrome: { runtime: { id: chrome.runtime.id, getManifest: () => manifest,
+      getURL: (path) => chrome.runtime.getURL(path) } }, requestContext: requestContext(undefined, { plain: true }) });
+    folderRuntimeKey = key;
+  }
+  return folderCore;
 }
 
 /* ====================================================================== *
@@ -590,3 +615,4 @@ function throttle(fn, ms) {
   let last = 0;
   return (a) => { const n = Date.now(); if (n - last >= ms || a.phase !== 'Downloading') { last = n; fn(a); } };
 }
+import { createFolderUpdater } from './shared/folder-updater.js';

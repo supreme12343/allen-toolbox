@@ -112,5 +112,15 @@ test('workflow validates before publishing and protects existing version tags', 
   assert.ok(workflow.indexOf('npm test') < workflow.indexOf('node tools/publish-release.mjs'));
   assert.match(publisher, /'ls-remote', '--exit-code', '--tags'/); assert.match(publisher, /'--verify-tag', '--draft'/);
   assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/); assert.doesNotMatch(workflow + publisher, /--force|--clobber|cancel-in-progress: true/);
-  assert.match(workflow, /node-version: '24'/); assert.match(workflow, /branches: \[main\]/);
+  assert.match(workflow, /node-version: '24'/); assert.match(workflow, /branches: \[main, beta\/builtin-updater\]/);
+});
+
+test('BETA package uses numeric manifest version but prerelease identity, description and no native installer', async () => {
+  const env = fixture();
+  env.data.set('manifest.json', JSON.stringify({ manifest_version: 3, name: 'ALLEN Toolbox', version: '2.3.1', version_name: '2.3.1 BETA' }));
+  env.data.set('package.json', '{"version":"2.3.1"}');
+  const out = await buildRelease({ readAsset: env.readAsset });
+  assert.equal(out.version, '2.3.1'); assert.equal(out.prerelease, true); assert.equal(out.tag, 'v2.3.1-beta');
+  assert.equal(out.filename, 'ALLEN-Toolbox-2.3.1-BETA.zip'); assert.match(out.notes, /not the Latest stable version/);
+  assert.equal(out.nativeAvailable, false);
 });

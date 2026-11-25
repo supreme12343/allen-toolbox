@@ -1,4 +1,21 @@
-# ALLEN Toolbox 2.3.0
+# ALLEN Toolbox 2.3.1 BETA
+
+**Experimental prerelease for beta testers. This is not the Latest stable version.** Normal users should stay on [2.3.0 stable](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0).
+
+## Built-In Updater Beta
+
+This beta tests a new browser-only update method using Chrome's File System Access API. There is no Windows installer, EXE, PowerShell helper or store registration. Loading unpacked does **not** grant filesystem access; setup asks you to choose the original extension folder and approve read/write access explicitly.
+
+1. Extract the BETA ZIP and load its `allen-toolbox` folder with Developer mode at `chrome://extensions`. A separate permanent beta folder lets you keep the stable installation intact; disable the stable copy while testing on the same website to avoid duplicate page scripts.
+2. Open **Utilities > Built-in updater BETA setup**. Read and acknowledge the single-browser/profile testing warning.
+3. Select the original folder containing `manifest.json`. Setup verifies that the selected folder belongs to the running extension before connecting it.
+4. Review the beta release before installing. Automatic file installation is **off by default**, and turning it on is an additional opt-in.
+
+The updater checks the fixed official GitHub repository, verifies the RSA signature before extracting/writing a release, protects local edits and saves recovery data before changing files. It pauses for active downloads and script editors. Stable releases remain separate from beta releases; v2.3.0 stays GitHub's Latest.
+
+**Testing limits:** use the installation folder only in one browser/profile. Permissions can expire or be revoked, and Chrome must be running for browser-based checks. File writes are atomic individually, not as a whole folder. Interrupted updates may require **BETA update recovery** or manual re-extraction; the independent recovery page does not depend on the background worker. Changes to permissions or the frozen recovery bootstrap require manual review/installation. Saved userscripts/settings remain in browser storage, but moving/reinstalling an unpacked extension can change its ID and does not transfer that storage automatically.
+
+Report the beta/browser versions, steps, expected/actual result and visible error. Do not share private lesson URLs, cookies, authorization headers or personal script values.
 
 A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 
@@ -7,7 +24,7 @@ A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 * **Recordings**: direct files and supported HLS VOD, transient-request retries, bounded timeouts, verified ranges and final sizes. Separate HLS audio is downloadable and is clearly distinguished from a combined recording.
 * **Scripts**: a local userscript editor and manager, a real `scripts/` folder, and **Export extension ZIP** to ship saved scripts with the entire runtime extension.
 * **Utilities**: reversible overlay cleanup, focus reading, clean-link and page-link copying, text export, visible screenshots, playback speed, media rescan, and browser downloads access.
-* **GitHub updates**: automatic hourly checks of the fixed official repository. Manual ZIP updates work without native software. An executable installer is included only when Windows verifies a prebuilt helper and scripts signed by the same trusted code-signing publisher. No URL setup is required or available.
+* **GitHub updates**: this BETA checks a separate prerelease channel and offers an explicitly approved folder updater. Stable builds keep normal stable-release checks. No repository URL setup is required or available, and this beta contains no native executable installer.
 
 ## Install
 
@@ -222,6 +239,7 @@ Copyright cannot prohibit general inspiration, independently written implementat
 
 ## Changelog
 
+* **2.3.1 BETA**: experimental built-in folder updater with explicit permission, signed package checks, local-edit protection, backups and standalone recovery. Separate beta branch/channel and prerelease publishing; stable 2.3.0 remains Latest. Automatic installation is opt-in, not enabled by download or Load unpacked alone.
 * **2.3.0**: remove client-side executable compilation and policy bypasses, require trusted same-publisher Windows signatures, isolate native protocol 2 with multi-client activity and cross-session locks, harden recovery and folder boundaries, and restore mandatory Windows/antivirus release validation. Standard builds remain manual-only until a trusted Windows signing certificate is configured. Include the running-version badge and validatorless capped-media compatibility fix.
 * **2.2.0**: bundle an explicitly approved Windows installer/updater, constrained Native Messaging, signed automatic installation with rollback and fixed official source, and Shaan's restricted-source copyright notice. Downloading alone is not consent; Chrome's initial Load unpacked step remains required.
 * **2.1.3**: hard-lock updates to the official repository; remove manual URL entry and source switching; migrate legacy source settings safely; keep automatic checks enabled by default without setup.

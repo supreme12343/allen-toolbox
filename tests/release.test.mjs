@@ -124,3 +124,15 @@ test('BETA package uses numeric manifest version but prerelease identity, descri
   assert.equal(out.filename, 'ALLEN-Toolbox-2.3.1-BETA.zip'); assert.match(out.notes, /not the Latest stable version/);
   assert.equal(out.nativeAvailable, false);
 });
+
+test('a named 2.4.0 release keeps numeric update identity and excludes all native installers', async () => {
+  const env = fixture();
+  env.data.set('manifest.json', JSON.stringify({ manifest_version: 3, name: 'ALLEN Toolbox', version: '2.4.0', version_name: '2.4.0 Test Prime' }));
+  env.data.set('package.json', '{"version":"2.4.0"}');
+  const out = await buildRelease({ readAsset: env.readAsset, nativeDirectory: 'must-not-be-read' });
+  assert.equal(out.title, 'ALLEN Toolbox 2.4.0 Test Prime'); assert.equal(out.tag, 'v2.4.0'); assert.equal(out.prerelease, false);
+  assert.equal(out.filename, 'ALLEN-Toolbox-2.4.0.zip'); assert.equal(out.nativeAvailable, false);
+  assert.match(out.notes, /Restore write access/); assert.match(out.notes, /browser restarts/);
+  const files = await archiveFiles(out.blob);
+  assert.ok([...files.keys()].every((path) => !/\.(exe|ps1|cmd|cs)$/i.test(path)));
+});

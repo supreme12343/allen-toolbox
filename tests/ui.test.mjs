@@ -49,9 +49,11 @@ test('the persistent header shows the running manifest version before background
   assert.match(html.match(/<header>([\s\S]*?)<\/header>/)[1], /id="extension-version"/);
   const js = await readFile(new URL('../popup/popup.js', import.meta.url), 'utf8');
   const setup = js.slice(js.indexOf('const $ ='), js.indexOf('let tabId ='));
-  for (const version of ['2.2.0', '2.10.3', '65535.65535.65535.65535']) {
+  for (const manifest of [{ version: '2.2.0' }, { version: '2.10.3' }, { version: '65535.65535.65535.65535' },
+    { version: '2.4.0', version_name: '2.4.0 Solus' }]) {
+    const version = manifest.version_name || manifest.version;
     const badge = { hidden: true, setAttribute(name, value) { this[name] = value; } };
-    runInNewContext(setup, { chrome: { runtime: { getManifest: () => ({ version }) } }, document: { querySelector: (selector) => {
+    runInNewContext(setup, { chrome: { runtime: { getManifest: () => manifest } }, document: { querySelector: (selector) => {
       assert.equal(selector, '#extension-version'); return badge;
     } } });
     assert.equal(badge.textContent, 'v' + version);

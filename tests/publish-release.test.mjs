@@ -80,6 +80,19 @@ test('BETA publication is explicitly prerelease and never marks itself Latest', 
   assert.ok(env.calls.find((call) => call.args[1] === 'create').args.includes('--notes-file'));
 });
 
+test('a named normal release publishes its chosen title without beta flags', async () => {
+  const current = { ...release, ...releaseIdentity('2.4.0', false, '2.4.0 Test Prime'), notes: 'Built-in remembered folder updates.' };
+  const text = checksum + '  ' + current.filename + '\n';
+  const assets = [{ ...expected[0], name: current.filename }, { ...expected[1], name: current.filename + '.sha256', size: Buffer.byteLength(text), digest: 'sha256:' + hash(text) },
+    { ...expected[2], name: current.filename + '.sig' }];
+  const env = fixture({ release: current, assets });
+  await env.publish();
+  const creation = env.calls.find((call) => call.command === 'gh' && call.args[1] === 'create').args;
+  assert.equal(creation[creation.indexOf('--title') + 1], 'ALLEN Toolbox 2.4.0 Test Prime');
+  const publish = env.calls.find((call) => call.command === 'gh' && call.args[1] === 'edit').args;
+  assert.ok(publish.includes('--latest')); assert.ok(!publish.includes('--prerelease')); assert.equal(env.state.prerelease, false);
+});
+
 test('a tag push followed by failed draft creation can resume the same commit without changing the tag', async () => {
   const env = fixture({ failCreate: true });
   await assert.rejects(env.publish(), /temporarily unavailable/); assert.equal(env.tag, commit); assert.equal(env.state, null);

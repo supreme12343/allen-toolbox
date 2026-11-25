@@ -1,4 +1,4 @@
-export function releaseNotes({ version, prerelease = false }) {
+export function releaseNotes({ version, versionName = version, prerelease = false }) {
   if (prerelease) return `## ${version} BETA - Built-In Updater Test
 
 **This is an experimental prerelease for beta testers, not the Latest stable version.**
@@ -39,6 +39,42 @@ This small version-bump release tests the existing updater without changing its 
 Report the BETA version, browser version, steps, expected/actual result, and the visible error. Do not share private lesson URLs, cookies, authorization headers or personal script values.
 
 **Stable remains Latest:** [v2.3.0](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0).
+`;
+  if (version !== '2.3.0') return `## ALLEN Toolbox ${versionName}
+
+The browser-only updater moves out of beta, with remembered folder access and safer retry/recovery handling. No store account, Windows installer, EXE or PowerShell helper is needed.
+
+### New in 2.4.0
+
+- Connect the original unpacked extension folder once. The directory handle, installation identity and automatic-update preference are saved in this browser profile and reused after extension reloads and browser restarts.
+- If Chrome withdraws write permission, **Restore write access** reapproves the saved folder without opening another folder picker. A moved, forgotten or missing folder still requires an explicit selection.
+- Deferred automatic installations retry from validated release metadata when work is idle, instead of silently waiting for another hourly GitHub check. Permission loss, local edits and recovery errors pause installation rather than being bypassed.
+- Signed releases are verified before extraction and file replacement. Packaged local edits, changed permissions, corrupt archives and recovery-bootstrap changes block automatic replacement.
+- Existing downloads, PDF/video tools, saved userscripts, settings and the running-version badge remain available. Completed download Blobs are retained through update-admission waits.
+
+### Enable Built-In Updates
+
+1. Extract the official ZIP into a permanent folder and load its \`allen-toolbox\` folder with **Load unpacked** at \`chrome://extensions\`.
+2. Open **Utilities > Built-in updater setup** and confirm that only this browser/profile uses the installation folder.
+3. Click **Choose extension folder**, select that exact loaded folder containing \`manifest.json\`, and approve Chrome's read/write access. The folder picker can grant access itself; a second dialog is not always shown.
+4. Enable **Automatic file installation** if desired. It is off by default. Keep automatic release checks enabled, or use **Check for updates** manually.
+5. Future checks reuse the saved folder. If permission is lost, click **Restore write access**; do not remove/reinstall the extension or repeatedly choose a new folder.
+
+### Existing Beta Testers
+
+The real 2.3.1 BETA to 2.3.2 BETA in-place test succeeded: installed runtime files matched the signed release. Connected beta users can check for this release and install it through their existing updater. The signing key, extension permissions and independent recovery bootstrap are preserved. The folder connection and opt-in remain in the same browser profile, and future checks use the regular release channel.
+
+Users on 2.3.0 without the built-in updater need one manual file replacement/reload to obtain this feature. Keep the original folder and browser extension ID to preserve local settings and scripts.
+
+### Safety and Limits
+
+Chrome controls filesystem permissions. The updater cannot make them permanent, bypass a denial, preserve data after browser storage is cleared, or share a connection between profiles. When offered, Chrome's **Allow on every visit** option can retain access.
+
+Use one browser/profile per installation folder. Backups and a durable recovery journal protect per-file updates, but whole-folder replacement is not atomic. Close script editors and finish active downloads before applying an update. Use **Update recovery** if a transaction is interrupted; the recovery page retains its earlier BETA wording because its tested bootstrap is intentionally unchanged.
+
+Windows checks, updater/media regressions, real Chrome storage tests and a protected Defender scan run before publication. No antivirus exclusions are added to users' machines, and no promise of zero false positives is made.
+
+The ZIP, checksum and RSA signature are included below. Original project code remains Copyright (c) 2026 Shaan; third-party notices are preserved.
 `;
   return `## ALLEN Toolbox ${version} - Stable Release
 

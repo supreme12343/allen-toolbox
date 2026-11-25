@@ -25,12 +25,15 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-export function releaseIdentity(version, prerelease = false) {
+export function releaseIdentity(version, prerelease = false, versionName = '') {
   versionParts(version);
   if (typeof prerelease !== 'boolean') throw new Error('Invalid release channel');
-  return { version, prerelease, tag: 'v' + version + (prerelease ? '-beta' : ''),
+  const display = versionName || version + (prerelease ? ' BETA' : '');
+  if (typeof display !== 'string' || display.length > 100 || display !== version && !display.startsWith(version + ' ') ||
+      !/^[A-Za-z0-9 ._-]+$/.test(display) || prerelease && display !== version + ' BETA' || !prerelease && /\bBETA$/i.test(display)) throw new Error('Invalid release display name');
+  return { version, versionName: display, prerelease, tag: 'v' + version + (prerelease ? '-beta' : ''),
     filename: 'ALLEN-Toolbox-' + version + (prerelease ? '-BETA' : '') + '.zip',
-    title: 'ALLEN Toolbox ' + version + (prerelease ? ' BETA' : '') };
+    title: 'ALLEN Toolbox ' + display };
 }
 
 export function isBetaManifest(manifest) { return manifest?.version_name === manifest?.version + ' BETA'; }

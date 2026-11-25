@@ -1,27 +1,36 @@
-# ALLEN Toolbox 2.3.2 BETA
+# ALLEN Toolbox 2.4.0 Solus
 
-**Experimental prerelease for beta testers. This is not the Latest stable version.** Normal users should stay on [2.3.0 stable](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0).
+Local study tools with signed, browser-only extension updates. Connect the original extension folder once; this browser profile remembers it for future updates. No store fee, Windows installer, EXE or PowerShell helper is needed.
 
-## 2.3.1 to 2.3.2 Update Test
+## Built-In Updates
 
-This is a small version-bump release for testing the existing built-in updater. No updater engine, folder permission, signing key or recovery-bootstrap changes are included.
+1. Extract the official ZIP into a permanent folder and load its **`allen-toolbox`** folder using **Load unpacked** at `chrome://extensions`.
+2. Open **Utilities > Built-in updater setup**. Confirm that the installation folder is used only by this browser/profile.
+3. Click **Choose extension folder** and select the exact loaded folder containing `manifest.json`, not its parent or another copy. Approve Chrome's read/write access. Folder selection can grant access directly; a second permission popup is not always shown.
+4. The page should show **Folder remembered** and **Permission: Granted**. Optionally enable **Automatic file installation**, which is off by default. Keep automatic release checks enabled, or check manually.
+5. Updates reuse the saved connection after extension reloads and browser restarts. When Chrome withdraws permission, click **Restore write access** to reapprove the saved folder without selecting it again. Choose a folder again only if it was moved, forgotten, or its saved handle is missing.
 
-If you already connected **2.3.1 BETA**, keep that installation folder unchanged. Open **Utilities > Built-in updater BETA setup**, click **Check for beta update**, then **Install checked beta update**. Do not manually extract the new ZIP over the folder before this test. Successful installation and reload should show **2.3.2 BETA** in the header. Existing automatic-install opt-in may apply it when idle.
+The directory handle, ownership identity, baseline and automatic-install setting are stored in IndexedDB under the extension's browser profile. Normal refreshes and transient permission failures do not discard them. Chrome controls whether a grant persists; choose **Allow on every visit** if offered. The updater cannot force permanent access or recover a connection after browser storage is deleted or the extension is reinstalled under a different ID.
 
-## Built-In Updater Beta
+Keep the installation folder's original path and name, even if it still says an older BETA version. The header shows the running version; renaming or moving the folder can change the extension ID and break the remembered connection.
 
-This beta tests a new browser-only update method using Chrome's File System Access API. There is no Windows installer, EXE, PowerShell helper or store registration. Loading unpacked does **not** grant filesystem access; setup asks you to choose the original extension folder and approve read/write access explicitly.
+### Updating and Recovery
 
-1. Extract the BETA ZIP and load its `allen-toolbox` folder with Developer mode at `chrome://extensions`. A separate permanent beta folder lets you keep the stable installation intact; disable the stable copy while testing on the same website to avoid duplicate page scripts.
-2. Open **Utilities > Built-in updater BETA setup**. Read and acknowledge the single-browser/profile testing warning.
-3. Select the original folder containing `manifest.json`. Setup verifies that the selected folder belongs to the running extension before connecting it.
-4. Review the beta release before installing. Automatic file installation is **off by default**, and turning it on is an additional opt-in.
+The official repository is fixed to [supreme12343/allen-toolbox](https://github.com/supreme12343/allen-toolbox). Release checks are hourly while Chrome is running. An automatic install postponed by active work retries from verified release metadata with bounded backoff, rather than repeatedly calling GitHub. Turning off automatic checks or file installation stops further automatic attempts; an already admitted transaction must finish or recover safely.
 
-The updater checks the fixed official GitHub repository, verifies the RSA signature before extracting/writing a release, protects local edits and saves recovery data before changing files. It pauses for active downloads and script editors. Stable releases remain separate from beta releases; v2.3.0 stays GitHub's Latest.
+Deferred attempts retry after 1, 2, 4, 8 and 15 minutes. If that limit is reached, setup shows **Retry limit reached**; resolve the cause and press **Check for updates** to start a fresh attempt. Simply opening the popup cannot keep postponing a retry that is already due.
 
-**Testing limits:** use the installation folder only in one browser/profile. Permissions can expire or be revoked, and Chrome must be running for browser-based checks. File writes are atomic individually, not as a whole folder. Interrupted updates may require **BETA update recovery** or manual re-extraction; the independent recovery page does not depend on the background worker. Changes to permissions or the frozen recovery bootstrap require manual review/installation. Saved userscripts/settings remain in browser storage, but moving/reinstalling an unpacked extension can change its ID and does not transfer that storage automatically.
+Updates verify the RSA signature before extraction or file writes, then verify the installation marker and tracked file hashes. Local edits, permission increases, unsafe ZIP contents and recovery-bootstrap changes require manual review instead of silent overwrite. Saved userscripts and settings stay in browser storage and are not replaced by packaged source updates.
 
-Report the beta/browser versions, steps, expected/actual result and visible error. Do not share private lesson URLs, cookies, authorization headers or personal script values.
+Finish downloads and close script editors before installing. Original files are journaled before changes; dependencies precede entrypoints and the manifest is written last. Each file write is transactional, but the entire folder is not atomically replaced. Interrupted writes retain their recovery journal. Use **Update recovery** to restore verified originals; if the background page is broken, the standalone recovery page does not depend on it. Its earlier BETA label is preserved to keep the tested recovery bootstrap byte-identical for existing beta users.
+
+**Do not share one installation folder between browser profiles.** Browser Web Locks cannot coordinate another profile or an external file editor. Keep backups of local changes. Removing the extension, clearing its storage or moving its installation folder can lose access to the saved handle and recovery data. There is no silent permission bypass or guarantee of perfectly failure-free updates.
+
+### Existing Beta Users
+
+The real **2.3.1 BETA to 2.3.2 BETA** file-update test succeeded: all installed runtime files matched the signed release. Connected beta users can check for 2.4.0 and install it through their existing updater. Keep the same folder/profile; the saved handle and automatic-install opt-in are preserved. The signing key, manifest permissions and frozen recovery bootstrap remain unchanged, and future release checks use the regular channel.
+
+Users on 2.3.0 without this feature need one manual file replacement/reload to get the built-in updater. Do not remove/reinstall if you want to preserve settings and scripts. Report the extension/browser versions, steps and visible error if a problem occurs; omit private lesson URLs, cookies, authorization headers and personal script values.
 
 A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 
@@ -30,13 +39,13 @@ A Chrome / Edge / Brave extension (Manifest V3) that bundles:
 * **Recordings**: direct files and supported HLS VOD, transient-request retries, bounded timeouts, verified ranges and final sizes. Separate HLS audio is downloadable and is clearly distinguished from a combined recording.
 * **Scripts**: a local userscript editor and manager, a real `scripts/` folder, and **Export extension ZIP** to ship saved scripts with the entire runtime extension.
 * **Utilities**: reversible overlay cleanup, focus reading, clean-link and page-link copying, text export, visible screenshots, playback speed, media rescan, and browser downloads access.
-* **GitHub updates**: this BETA checks a separate prerelease channel and offers an explicitly approved folder updater. Stable builds keep normal stable-release checks. No repository URL setup is required or available, and this beta contains no native executable installer.
+* **Built-in updates**: signed browser-only folder installation with saved access, explicit permission restoration, opt-in automation, local-edit protection and durable recovery. No changeable repository path or native installer.
 
 ## Install
 
 1. Download the official ZIP and extract it to a permanent folder. The standard build does not include or enable an unsigned executable helper.
 2. Open `chrome://extensions` and switch on **Developer mode** (top-right). A downloaded file or Windows installer cannot silently register an unpacked extension in Chrome.
-3. Click **Load unpacked** and select the extracted **`allen-toolbox`** folder containing `manifest.json`. If you deliberately installed a verified code-signed managed build instead, select **`%LOCALAPPDATA%\ALLENToolbox\extension`**.
+3. Click **Load unpacked** and select the extracted **`allen-toolbox`** folder containing `manifest.json`.
 4. Pin the extension (puzzle-piece icon → pin).
 
 ### One switch for scripts (needed once)
@@ -45,25 +54,17 @@ Use a current desktop Chrome/Chromium browser, preferably 138+. Chrome only runs
 
 > Chrome cannot install a `.zip` directly — unzip it and use **Load unpacked**.
 
-### Antivirus and Windows updater safety
+### Antivirus and Installer Safety
 
 Microsoft Defender flagged a temporary, unsigned native-host executable generated by the old updater tests. That does not establish that a downloaded video was malicious, and it does not prove the detection was a false positive. Do not restore quarantined files, disable protection, or add exclusions merely to run this project.
 
-The hardened design does not compile executables on recipients' computers, does not launch PowerShell with `ExecutionPolicy Bypass`, and does not reuse the old unsigned native-host registration. Native protocol 2 uses a separate host name, signed-publisher checks, per-client activity tracking and fail-closed installation. Windows tests use inert managed-code and mocked fixtures rather than launching freshly generated unsigned EXEs.
+This release does not compile executables, launch PowerShell, register a native host, create Windows tasks or change antivirus preferences. The folder updater runs in Chrome using only the directory access you explicitly approve. Legacy native helper sources are retained in the repository for history/testing but are not packaged or invoked.
 
-**No trusted Windows code-signing certificate is configured in this checkout.** Its standard ZIP therefore omits executable installers and helper scripts, and its native-installation controls are disabled. Video/PDF downloads, userscripts, the visible running version, GitHub release checks and manual ZIP updates remain usable without the helper.
+The ZIP excludes executable installers and helper scripts. Video/PDF downloads, userscripts, version display, GitHub checks and the built-in folder updater do not require a Windows certificate or external software. Tests use inert fixtures instead of launching freshly generated unsigned EXEs.
 
 Code signing, tests and antivirus scans reduce risk; none guarantees that every antivirus vendor will accept a build. A ZIP's RSA `.sig` authenticates archive bytes; it is not Windows Authenticode signing and is not proof that code is harmless.
 
-### Signed Windows setup and uninstall
-
-**Downloading the ZIP, reading this README, or accepting the source license does not consent to installing software or background tasks.** If a future release includes a verified signed installer, run `Install-ALLEN-Toolbox.cmd`, read its publisher/setup details and approve explicitly; the default is No. Setup creates files under your user account, an hourly/logon task and per-user Native Messaging registrations for Chrome, Edge and Brave. It does not change browser profiles, trusted root certificates, global PowerShell policies or arbitrary system folders. Any already-valid leaf certificate added to your user-level TrustedPublisher store is separately disclosed in the consent text.
-
-After approved signed setup and the initial Load unpacked step, the external updater can install compatible official signed releases automatically. Actual file replacement always waits until all supported browsers are closed, including for native requests; one idle profile cannot authorize replacing another profile's active files. Checks and notifications remain available while browsers are open. Interrupted recovery also waits for safe conditions. **Utilities > GitHub updates** displays actual availability/status; it never claims an absent or unsigned helper is ready. The check switch controls browser checks, not a separately installed background schedule.
-
-For an existing unpacked installation, a verified signed installer supports `-Attach -ExtensionDirectory "C:\path\to\existing\allen-toolbox"` to keep its original folder/identity. Do not move/remove the extension if you want to retain its browser data. Protocol-1 unsigned helpers are not silently adopted or executed; an old background task should be disabled/removed explicitly before installing the new helper. Do not run a quarantined legacy executable.
-
-The signed installer's `-Uninstall` flow asks again and removes only owned registrations, tasks and helper files. Browser data, extension files, unknown local files and recovery backups are preserved. Shared publisher trust is not removed casually. Never lower your system's security policy to force an unsigned uninstaller to run.
+Downloading, reading the README or accepting the license does not grant filesystem permission. Use Chrome's folder picker or the explicit **Restore write access** button. **Forget folder** disconnects saved access without deleting extension files or browser-stored scripts; pending recovery must finish first. Existing old Windows tasks are not silently adopted or removed by this browser-only release. Do not run a quarantined legacy executable.
 
 ## GitHub releases and updates
 
@@ -76,15 +77,15 @@ Source and releases: [supreme12343/allen-toolbox](https://github.com/supreme1234
 
 A local release can also be built with Node 24+: `npm.cmd run release`. Outputs are in `dist/` and always use `https://github.com/supreme12343/allen-toolbox`. Build or publication attempts targeting another update repository are rejected.
 
-Windows helper packaging additionally requires `WINDOWS_SIGNING_PFX` (base64 of a CA-trusted code-signing PFX), `WINDOWS_SIGNING_PASSWORD`, and `WINDOWS_SIGNING_THUMBPRINT` as protected repository secrets. They are not configured by inventing a self-signed certificate or installing a new trusted root. `tools/build-windows-updater.ps1` prebuilds/signs the helper in CI; `tools/verify-windows-updater.ps1` verifies publisher trust and exact file hashes. A missing certificate produces a manual-only package; an incomplete, invalid or mismatched signing configuration blocks packaging. Certificate rotation requires explicit reattachment rather than silently trusting a different publisher.
+This release's packager always excludes native installers, even if old Windows signing configuration is present. Local development ZIPs without the protected `UPDATER_SIGNING_KEY` are unsigned and cannot be installed by signature-verifying folder updates.
 
-Publication keeps the release in draft until the ZIP, checksum and signature are uploaded and their hashes verified. The private signing key is stored only in the repository's `UPDATER_SIGNING_KEY` Actions secret; the helper pins the public verification key. Unsigned, modified, oversized, foreign-source or unsafe-path archives are refused before installation. A checksum downloaded from the same site is not used as a substitute for the signature.
+Publication keeps the release in draft until the ZIP, checksum and signature are uploaded and their hashes verified. The private signing key is stored only in the repository's `UPDATER_SIGNING_KEY` Actions secret; the folder updater pins the public verification key. Unsigned, modified, oversized, foreign-source or unsafe-path archives are refused before installation. A checksum downloaded from the same site is not used as a substitute for the signature.
 
 Windows validation is required, not `continue-on-error`. GitHub's disposable Windows images disable Defender and preconfigure broad exclusions, so a runner-only preparation step enables protection, removes those exclusions and updates signatures before the scan. This step refuses to run on ordinary PCs or self-hosted runners. Defender protection and archive scanning must be enabled; a detection or unavailable validation blocks publication. Rerunning the original workflow restores its same-commit artifact before rebuilding or signing, preserving timestamped native bytes. If that artifact has expired, publish a newer version rather than overwrite mismatched draft assets.
 
-If a tag push or upload succeeds but a later step fails, rerun **the same workflow run/commit** to resume missing draft uploads. Existing draft files with a different hash are refused, not overwritten. Published releases are never repaired in place; publish a newer version if an old release is incomplete. Local `npm.cmd run release` without the private signing key produces an unsigned development package, not a package the native updater will automatically trust.
+If a tag push or upload succeeds but a later step fails, rerun **the same workflow run/commit** to resume missing draft uploads. Existing draft files with a different hash are refused, not overwritten. Published releases are never repaired in place; publish a newer version if an old release is incomplete.
 
-**Without the external updater:** a Load unpacked extension cannot replace its own installed files. Close toolbox/editor tabs, extract the update, replace files in the **original permanent installation folder**, and press **Reload** at `chrome://extensions`; then reload the website. ZIP downloads are reported as queued, not installed or saved. With the explicitly installed Windows helper, signed file replacement happens outside Chrome and the extension reloads after confirmed installation. Chrome Web Store or supported managed distribution is another automatic-update route; this project does not publish signed CRXs to the store.
+**Manual fallback:** without a connected writable folder, close toolbox/editor tabs, extract the update into the **original permanent installation folder**, and press **Reload** at `chrome://extensions`; then refresh the website. ZIP downloads are reported as queued, not installed or saved. With approved folder access, the built-in updater replaces signed files and reloads only after confirmed installation and idle checks. This project does not publish signed CRXs to a browser store.
 
 **Saved scripts are separate:** runtime updates do not overwrite already imported userscripts, local edits, enabled states or values. To update an existing script deliberately, import the new `.user.js` into its existing editor entry, review it and press Save. Automatic `@updateURL` userscript replacement is not enabled by the GitHub release checker.
 
@@ -193,6 +194,8 @@ Shortcuts (change at `chrome://extensions/shortcuts`): `Alt+Shift+T` open panel 
 * *A recording fails repeatedly*: reduce parallelism in **Utilities**, replay it to refresh signed links, and retry. Transient requests retry automatically; authorization and format errors are not retried indefinitely.
 * *A server caps each byte-range response*: the downloader follows contiguous chunks until the whole file is assembled. If a direct media response omits a usable ETag/Last-Modified, it first tries a fresh complete request, then uses sequential ranges with overlapping-byte comparisons, a final leading-byte recheck and exact total-size checks. Wrong offsets, mismatched overlaps, changed metadata and incomplete bodies are refused. This compatibility path does not persist partial downloads and cannot prove an immutable file version without a server validator; the completed download includes that notice. HLS playlist byte-range validation remains strict.
 * *Saving is interrupted*: inspect **Open browser downloads** for disk, cancellation or network errors. A queued download is not the same as a saved file.
+* *Folder permission is needed*: use **Built-in updater setup > Restore write access**. The saved folder is reused; no new picker is needed unless its handle was lost or the folder moved. Do not clear browser storage or repeatedly click Forget folder.
+* *An update is deferred*: finish active downloads and close script editor tabs. Opted-in automation retries with bounded backoff. Permission, signature, local-change and recovery errors pause until addressed rather than retrying indefinitely.
 * After editing packaged files, press **Reload** on the extension card and reload the website. Folder rescans restore missing imports without overwriting installed scripts or their saved edits, enabled states and values.
 
 ## Privacy
@@ -216,8 +219,11 @@ content/               page-world unblockers and the bridge to the extension
 popup/                 the UI          sandbox/  syntax checker (eval-capable page)
 shared/                HLS / PDF / HTTP validation, names, TS demuxer, ZIP packaging
 shared/updates.js      GitHub release metadata checks and update notices
-shared/native-updater.js constrained Native Messaging bridge and installed status
-updater/               optional Windows installer, signed updater and native host
+shared/folder-updater.js browser folder access, saved connections, backups/recovery
+shared/builtin-updater.js guarded worker integration and installed status
+popup/updater.html      setup and remembered-folder permission restoration
+popup/updater-recovery.* frozen independent recovery bootstrap
+updater/               verification key and legacy native sources (not installers)
 scripts/               scripts.json and bundled .user.js files
 plugins/               PLUGIN_PROMPT.md and (optional) folder plugins
 icons/                 vector brand and generated PNG toolbar icons
@@ -245,6 +251,7 @@ Copyright cannot prohibit general inspiration, independently written implementat
 
 ## Changelog
 
+* **2.4.0 Solus**: promote the tested browser-only updater, remember folder access across reloads, restore permission using the saved handle, preserve automatic-install preferences, retry deferred installs safely, and document one-time setup and recovery. No native executable installer is included.
 * **2.3.2 BETA**: version-bump update-test release. Use the connected 2.3.1 BETA folder to exercise signed in-place installation and reload. Updater code, permissions, signing key and recovery bootstrap remain unchanged.
 * **2.3.1 BETA**: experimental built-in folder updater with explicit permission, signed package checks, local-edit protection, backups and standalone recovery. Separate beta branch/channel and prerelease publishing; stable 2.3.0 remains Latest. Automatic installation is opt-in, not enabled by download or Load unpacked alone.
 * **2.3.0**: remove client-side executable compilation and policy bypasses, require trusted same-publisher Windows signatures, isolate native protocol 2 with multi-client activity and cross-session locks, harden recovery and folder boundaries, and restore mandatory Windows/antivirus release validation. Standard builds remain manual-only until a trusted Windows signing certificate is configured. Include the running-version badge and validatorless capped-media compatibility fix.

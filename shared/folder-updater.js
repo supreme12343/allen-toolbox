@@ -16,7 +16,9 @@ const encoder = new TextEncoder(), decoder = new TextDecoder('utf-8', { fatal: t
 const MESSAGES = {
   SINGLE_PROFILE_REQUIRED: 'Acknowledge that only this browser profile may use this extension folder.',
   UNSUPPORTED_BROWSER: 'Folder updates require File System Access, IndexedDB, Web Crypto and Web Locks in a Chromium extension page.',
-  PERMISSION_REQUIRED: 'Read/write access is not granted. Reconnect the folder from the setup page; no background permission prompt was opened.',
+  PERMISSION_REQUIRED: 'Read/write access is not granted. Restore write access to the saved folder from the setup page; no background permission prompt was opened.',
+  CONNECTION_CHANGED: 'The saved folder connection changed. Refresh its state before restoring access; no extension files were changed.',
+  FOLDER_CHECK_FAILED: 'The saved folder could not be verified. Its connection and automatic-update setting were retained; no extension files were changed.',
   WRONG_FOLDER: 'The selected folder is not the folder currently loaded by this unpacked extension. No extension code was changed.',
   PROFILE_CONFLICT: 'This folder is owned by another browser profile or installation. No files were changed.',
   LOCAL_CHANGES: 'A tracked file changed or a new release file collides with a local file. Use a reviewed manual update; local changes were not silently overwritten.',
@@ -50,6 +52,7 @@ const MESSAGES = {
   MANIFEST_PERMISSION_CHANGE: 'This release changes extension permissions, security policy or injection/external-access scope. A reviewed manual installation is required; no automatic or manual folder write is allowed.',
   DEFLATE_UNAVAILABLE: 'This browser cannot unpack raw DEFLATE safely. Use the manual ZIP update.',
   BUSY: 'Installation is deferred while downloads or file operations are active.',
+  AUTOMATIC_DISABLED: 'Automatic file installation is off. The saved folder was retained and no files were changed.',
 };
 
 function failure(code) { const error = new Error(MESSAGES[code] || MESSAGES.WRITE_FAILED); error.code = code; return error; }
@@ -507,12 +510,82 @@ export function createFolderUpdater({ chrome: browser = globalThis.chrome, fetch
             }
           } catch (error) {
             const granted = await permission(data.config.handle);
-            return publicState(data.config, null, granted !== 'granted' ? { code: 'PERMISSION_REQUIRED', state: 'needs-permission', permission: granted } : { code: error.code || 'FOLDER_MOVED', state: 'error' });
+            return publicState(data.config, null, granted !== 'granted' ? { code: 'PERMISSION_REQUIRED', state: 'needs-permission', permission: granted } :
+              { code: error.code || (error.name === 'NotFoundError' ? 'FOLDER_MOVED' : 'FOLDER_CHECK_FAILED'), state: 'error' });
           }
         }
         return publicState(data.config, data.journal);
       });
     } catch (error) { return publicState(undefined, null, { code: 'STORAGE_FAILED', state: 'needs-recovery', recoveryPending: true, permission: 'unavailable' }); }
+  }
+
+  /** Prepare before the click; only the returned callback may request user-activated access. */
+  async function prepareFolderPermissionRequest() {
+    if (!supported()) return null;
+    let prepared;
+    try {
+      prepared = await locks.request(FOLDER_UPDATER_LOCK, { mode: 'exclusive' }, async () => {
+        const data = await records(), { config } = data, handle = config.handle;
+        if (config.schema !== 1 || !UUID.test(config.profileId) || !UUID.test(config.installationId) || config.singleProfileAcknowledged !== true ||
+            handle?.kind !== 'directory' || typeof handle.requestPermission !== 'function' || typeof handle.queryPermission !== 'function' ||
+            typeof handle.isSameEntry !== 'function') return null;
+        const granted = await permission(handle);
+        if (granted === 'unavailable') return null;
+        if (granted === 'granted') await checkOwner(config);
+        return data;
+      });
+    } catch (error) { return null; }
+    if (!prepared) return null;
+    const { config: captured } = prepared, handle = captured.handle;
+    return { async request() {
+      let reply = 'unavailable';
+      // This call must precede every await, DB read and lock request in the click path.
+      try { reply = await handle.requestPermission({ mode: 'readwrite' }); } catch (error) {}
+      let data = prepared, locked = false;
+      try {
+        return await locks.request(FOLDER_UPDATER_LOCK, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+          assert(lock, 'BUSY');
+          locked = true;
+          try { data = await records(); } catch (error) { throw failure('STORAGE_FAILED'); }
+          const { config, journal } = data;
+          assert(config.schema === 1 && config.profileId === captured.profileId && config.installationId === captured.installationId &&
+            config.singleProfileAcknowledged === true && config.handle?.kind === 'directory', 'CONNECTION_CHANGED');
+          let same = false;
+          try { same = typeof config.handle.isSameEntry === 'function' && await config.handle.isSameEntry(handle); } catch (error) {}
+          assert(same === true, 'CONNECTION_CHANGED');
+          const granted = await permission(config.handle);
+          if (reply !== 'granted' || granted !== 'granted') return publicState(config, journal, {
+            permission: reply === 'granted' ? granted : ['prompt', 'denied'].includes(reply) ? reply : 'unavailable',
+            state: journal ? 'needs-recovery' : 'needs-permission', code: journal && config.lastError === 'LOCAL_CHANGES' ? 'LOCAL_CHANGES' : 'PERMISSION_REQUIRED' });
+          try {
+            await checkOwner(config);
+            if (journal) {
+              // An interrupted folder may contain candidate bytes. Validate its durable baseline,
+              // not an all-original live folder, and leave recovery to a separate explicit action.
+              await validateJournal(config, journal);
+              return publicState(config, journal, { code: config.lastError === 'PERMISSION_REQUIRED' ? 'RECOVERY_PENDING' : config.lastError || 'RECOVERY_PENDING' });
+            }
+            await readBaseline(config); await checkOwner(config);
+          } catch (error) {
+            if (!journal && ['LOCAL_CHANGES', 'PROFILE_CONFLICT', 'FOLDER_MOVED'].includes(error.code)) {
+              data.config = { ...config, lastState: 'error', lastError: error.code };
+              try { await save({ config: data.config }); } catch (ignored) { throw failure('STORAGE_FAILED'); }
+            }
+            throw error;
+          }
+          const next = config.lastError === 'PERMISSION_REQUIRED' ? { ...config, lastState: config.reloadPending ? 'updated' : 'ready', lastError: '' } : config;
+          if (next !== config) try { await save({ config: next }); } catch (error) { throw failure('STORAGE_FAILED'); }
+          return publicState(next);
+        });
+      } catch (error) {
+        const code = !locked ? 'BUSY' : MESSAGES[error.code] ? error.code : error.name === 'NotAllowedError' ? 'PERMISSION_REQUIRED' : 'FOLDER_CHECK_FAILED';
+        const unknown = code === 'STORAGE_FAILED' || code === 'BUSY';
+        return publicState(data.config, data.journal, { code, recoveryPending: unknown || !!data.journal,
+          state: code === 'BUSY' ? 'deferred' : unknown || data.journal ? 'needs-recovery' : code === 'PERMISSION_REQUIRED' ? 'needs-permission' : 'error',
+          ...(unknown ? { permission: 'unavailable' } : {}),
+          ...(code === 'BUSY' ? { message: 'Folder access was requested, but another updater action is still running. Refresh its state after that action finishes; no update was started.' } : {}) });
+      }
+    } };
   }
 
   function connectFolder(handle, { singleProfileAcknowledged, automatic = false } = {}) {
@@ -577,10 +650,12 @@ export function createFolderUpdater({ chrome: browser = globalThis.chrome, fetch
     });
   }
 
-  function applyFolderRelease(release, { busy = false } = {}) {
+  function applyFolderRelease(release, { busy = false, automatic = false } = {}) {
     return mutate(async ({ config, journal: pending }) => {
       assert(!pending, 'RECOVERY_PENDING');
       if (busy !== false) return publicState(config, null, { state: 'deferred', code: 'BUSY' });
+      assert(typeof automatic === 'boolean', 'RELEASE_INVALID');
+      if (automatic && config.autoInstall !== true) return publicState(config, null, { state: 'deferred', code: 'AUTOMATIC_DISABLED' });
       assert(config.handle && config.singleProfileAcknowledged, 'SINGLE_PROFILE_REQUIRED');
       assert(await permission(config.handle) === 'granted', 'PERMISSION_REQUIRED');
       assert(config.installedVersion === runningVersion && (config.installedVersionName || '') === runningVersionName, 'RELOAD_REQUIRED');
@@ -655,12 +730,13 @@ export function createFolderUpdater({ chrome: browser = globalThis.chrome, fetch
     });
   }
 
-  return { getFolderUpdateState, connectFolder, setFolderAutomatic, forgetFolder, applyFolderRelease, recoverFolder };
+  return { getFolderUpdateState, prepareFolderPermissionRequest, connectFolder, setFolderAutomatic, forgetFolder, applyFolderRelease, recoverFolder };
 }
 
 let defaultUpdater;
 function updater() { return defaultUpdater ||= createFolderUpdater(); }
 export const getFolderUpdateState = () => updater().getFolderUpdateState();
+export const prepareFolderPermissionRequest = () => updater().prepareFolderPermissionRequest();
 export const connectFolder = (handle, options) => updater().connectFolder(handle, options);
 export const setFolderAutomatic = (automatic) => updater().setFolderAutomatic(automatic);
 export const forgetFolder = () => updater().forgetFolder();

@@ -37,9 +37,10 @@ export async function buildRelease({ repository = '', readAsset = sourceAsset, s
     return { path, text: await text(path) };
   }));
   const publicKey = JSON.parse(await text('updater/public-key.json'));
-  const identity = releaseIdentity(manifest.version, isBetaManifest(manifest));
-  const native = await loadWindowsUpdater({ directory: identity.prerelease ? '' : nativeDirectory, pinnedPublicKey: publicKey,
-    trustedLauncher: nativeDirectory ? await readAsset('Install-ALLEN-Toolbox.cmd') : undefined, ...(verifyNative ? { verify: verifyNative } : {}) });
+  const identity = releaseIdentity(manifest.version, isBetaManifest(manifest), manifest.version_name || '');
+  // This release uses browser-granted folder access only. Legacy native build
+  // metadata cannot introduce executables or installers into its update payload.
+  const native = await loadWindowsUpdater();
   const installerFiles = [...(native.files.length ? native.files : [{ path: 'updater/public-key.json', data: await readAsset('updater/public-key.json') }]),
     { path: 'updater/availability.json', data: JSON.stringify(native.metadata, null, 2) + '\n' }];
   const nativeConfig = 'export const WINDOWS_UPDATER_AVAILABLE = ' + native.metadata.available + ';\nexport const WINDOWS_UPDATER_PUBLISHER = ' + JSON.stringify(native.metadata.publisherThumbprint) + ';\n';
@@ -74,7 +75,7 @@ async function main() {
   console.log('Built dist/' + result.filename + ' (' + result.blob.size + ' bytes)');
   console.log(result.repository ? 'Update repository: ' + result.repository : 'No update repository configured; this ZIP is unlinked.');
   console.log('SHA-256: ' + result.checksum);
-  console.log(result.prerelease ? 'BETA browser-folder updater package: no native installer included.' : result.nativeAvailable ? 'Trusted signed Windows installer included.' : 'Manual extension package: no executable helper or unsigned installer included.');
+  console.log('Built-in browser folder updater package: no native installer or executable included.');
   console.log(result.signature ? 'RSA-SHA256 updater signature generated.' : 'Unsigned local development package: signature-verifying updaters will refuse installation of it.');
 }
 

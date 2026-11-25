@@ -30,3 +30,11 @@ test('the runtime signature key is identical to the previously pinned release ke
   const [runtime, release] = await Promise.all(['../shared/update-public-key.json', '../updater/public-key.json'].map((path) => readFile(new URL(path, import.meta.url), 'utf8').then(JSON.parse)));
   assert.deepEqual(runtime, release);
 });
+
+test('release codenames affect display titles but never the stable tag or archive URL', () => {
+  const out = releaseIdentity('2.4.0', false, '2.4.0 Test Prime');
+  assert.equal(out.title, 'ALLEN Toolbox 2.4.0 Test Prime'); assert.equal(out.tag, 'v2.4.0'); assert.equal(out.filename, 'ALLEN-Toolbox-2.4.0.zip');
+  assert.throws(() => releaseIdentity('2.4.0', false, '2.4.0 BETA'), /display name/);
+  assert.throws(() => releaseIdentity('2.4.0', false, '2.4.1 Other'), /display name/);
+  assert.throws(() => releaseIdentity('2.4.0', true, '2.4.0 Test Prime'), /display name/);
+});

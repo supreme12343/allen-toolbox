@@ -3,7 +3,6 @@ import { sourceUrl } from '../shared/usmeta.js';
 import { safeBase } from '../shared/names.js';
 import { cleanPageLink, matchesMediaFilter } from '../shared/utilities.js';
 import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
-import { WINDOWS_UPDATER_AVAILABLE } from '../shared/native-updater-config.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
@@ -786,18 +785,18 @@ function renderUpdates(next) {
   $('#update-release').hidden = !next.available;
   $('#update-download').hidden = !next.available || !next.latest?.downloadUrl;
   const native = next.native;
-  const folderMode = next.channel === 'beta';
-  $('#folder-updater-setup').hidden = !folderMode;
-  $('#update-install').textContent = folderMode ? 'Install verified beta update' : 'Check Windows updater';
-  $('#update-install').hidden = !(folderMode || WINDOWS_UPDATER_AVAILABLE) || !native?.installed || (!next.available && !native.requiresReload);
+  const folderMode = native?.kind === 'folder';
+  $('#folder-updater-setup').hidden = false;
+  $('#update-install').textContent = 'Install verified update';
+  $('#update-install').hidden = !folderMode || !native?.installed || (!next.available && !native.requiresReload) || native.permission !== 'granted' || native.recoveryPending;
   $('#update-install').disabled = !!native?.applying || next.checking || !!$('#update-install').dataset.busy;
   const nativeFeedback = $('#native-updater-status');
-  const nativeError = native?.error === 'browser-running' ? 'Automatic installation waits until all supported browsers are closed.' : native?.error;
-  const nativeMessage = folderMode ? native?.uncertain ? 'BETA folder update needs recovery. Open the updater setup or Recovery page before continuing.' : native?.connected ?
-    'BETA folder updater: ' + (native.permission === 'granted' ? native.autoInstall ? 'automatic installation opted in.' : 'connected; automatic installation is off.' : 'folder permission needs approval again.') :
-    'BETA experiment: grant access to the original extension folder in updater setup. No external installer is used.' : !WINDOWS_UPDATER_AVAILABLE ? 'Automatic Windows installation is unavailable in this build. No executable installer is bundled; manual extension updates remain available.' : native?.uncertain ? 'Windows updater status is unresolved. Downloads wait for a safe status recheck.' : native?.installed ? nativeError ? 'Windows updater: ' + nativeError : native.applying ? 'Windows updater is verifying the signed release...' :
-    'Signed Windows updater installed. Folder version: ' + native.installedVersion + (native.requiresReload ? '. Extension reload is pending.' : '. Installation waits until supported browsers are closed.') :
-    'Windows updater is not installed. Run the bundled installer once and approve its setup to enable automatic installation.';
+  let nativeMessage = native?.uncertain ? 'Folder update status needs recovery. Open updater setup or Recovery before continuing.' : native?.connected ?
+    native.error && native.permission === 'granted' ? 'Folder updater: ' + (native.message || native.error) :
+    'Folder remembered. ' + (native.permission === 'granted' ? native.autoInstall ? 'Automatic signed updates are enabled.' : 'Automatic installation is off.' : 'Use Restore write access in setup; selecting the folder again is not normally needed.') :
+    'Connect the original extension folder once in Built-in updater setup. No Windows installer is used.';
+  if (next.lastInstallState === 'retry-exhausted') nativeMessage += ' Retry limit reached; use Check for updates after the cause is resolved.';
+  else if (next.nextRetryAt && !native?.uncertain) nativeMessage += ' Deferred installation retry: ' + new Date(next.nextRetryAt).toLocaleTimeString() + '.';
   if (nativeFeedback.textContent !== nativeMessage) nativeFeedback.textContent = nativeMessage;
   const feedback = $('#update-status');
   feedback.className = 'status' + (next.checking ? '' : next.error ? ' err' : next.available ? ' warn' : '');
@@ -822,14 +821,14 @@ function wireUpdates() {
   wireAction($('#update-release'), () => chrome.tabs.create({ url: updateState.latest.url }));
   wireAction($('#update-download'), async () => {
     const result = await bg('updates:download');
-    status(result.filename + (WINDOWS_UPDATER_AVAILABLE ? ' queued. The ZIP includes the optional signed installer; approve its setup explicitly.' : ' queued. Extract to the original extension folder and reload it at chrome://extensions.'), 'ok');
+    status(result.filename + ' queued. This manual fallback requires extracting to the original folder and reloading at chrome://extensions.', 'ok');
   });
   wireAction($('#update-install'), async () => {
-    $('#native-updater-status').textContent = 'Windows updater is verifying and installing the signed release...';
+    $('#native-updater-status').textContent = 'The built-in updater is verifying and installing the signed release...';
     const result = await bg('updates:install');
     renderUpdates({ ...updateState, native: result });
-    if (result.state === 'error' || !result.installed) throw new Error(result.error || 'Windows updater is unavailable');
-    status(result.state === 'deferred' ? result.error === 'browser-running' ? 'Close all supported browsers; the signed scheduled updater can install when idle.' : result.error : result.requiresReload ? 'Update installed; the extension is reloading.' : 'Windows updater check complete.', result.state === 'deferred' ? 'warn' : 'ok');
+    if (result.state === 'error' || !result.installed) throw new Error(result.message || result.error || 'The folder updater is unavailable');
+    status(result.state === 'deferred' ? result.message || result.error : result.requiresReload ? 'Update installed; the extension is reloading.' : 'Built-in updater check complete.', result.state === 'deferred' ? 'warn' : 'ok');
   });
 }
 

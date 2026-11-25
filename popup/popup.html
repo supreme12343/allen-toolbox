@@ -136,12 +136,12 @@
         <button id="update-auto" class="row update-toggle" role="switch" aria-label="Automatic update checks" aria-describedby="update-auto-help" aria-checked="false" disabled><span class="tx"><span class="nm">Automatic update checks</span><span id="update-auto-help" class="ds">Check GitHub every hour and notify when a newer version is published.</span></span><span class="sw" aria-hidden="true"><i></i></span></button>
         <div class="grid"><button id="update-check" class="btn primary" disabled>Check for updates</button><button id="update-release" class="btn" hidden>View release</button></div>
         <button id="update-download" class="btn primary wide" hidden>Download update ZIP</button>
-        <button id="update-install" class="btn primary wide" hidden>Check Windows updater</button>
-        <button id="folder-updater-setup" class="btn wide" hidden>Built-in updater BETA setup</button>
+        <button id="update-install" class="btn primary wide" hidden>Install verified update</button>
+        <button id="folder-updater-setup" class="btn wide">Built-in updater setup</button>
         <p id="native-updater-status" class="status" role="status" aria-live="polite">Checking Windows updater setup...</p>
         <p id="update-status" class="status" role="status" aria-live="polite" aria-atomic="true">Loading update settings...</p>
-        <p id="update-help">BETA tests a browser-only folder updater. Setup must explicitly select the original extension folder and approve write access. Automatic installation is a separate opt-in and requires a signed release; permission loss pauses updates. No Windows installer or EXE is needed. For stable use, keep v2.3.0. Saved scripts and browser data remain in browser storage.</p>
-        <p><a href="updater-recovery.html" target="_blank" rel="noopener noreferrer">BETA update recovery</a></p>
+        <p id="update-help">Connect the original extension folder once and approve write access. The folder connection is remembered in this browser profile; if Chrome revokes permission, Restore write access reapproves the saved folder without selecting it again. Automatic installation is a separate opt-in. Updates must be signed and wait for active downloads and script editors. No Windows installer or EXE is used.</p>
+        <p><a href="updater-recovery.html" target="_blank" rel="noopener noreferrer">Update recovery</a></p>
       </div>
 
       <div class="group-title">Access</div>

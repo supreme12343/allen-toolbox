@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Folder Updates (Beta) | ALLEN Toolbox</title>
+  <title>Folder Updates | ALLEN Toolbox</title>
   <link rel="icon" href="../icons/icon32.png">
   <link rel="stylesheet" href="./theme.css">
   <link rel="stylesheet" href="./updater.css">
@@ -14,20 +14,19 @@
     <div class="brand">
       <img src="../icons/logo.svg" alt="" width="32" height="32">
       <div><b>ALLEN Toolbox</b><span class="brand-caption">Browser-only folder updater</span></div>
-      <span class="beta-badge">BETA</span>
     </div>
     <a class="button quiet" id="back-dashboard" href="./popup.html?dashboard=1&amp;view=tools">Back to Utilities</a>
   </header>
 
   <main id="setup" class="page" tabindex="-1" aria-busy="false">
     <div class="page-heading">
-      <p class="eyebrow">Experimental / 2.3.1 BETA</p>
+      <p class="eyebrow">Unpacked extension / signed releases</p>
       <h1>Folder updates, with your permission.</h1>
-      <p class="intro">Connect the original unpacked extension folder to test signed beta updates entirely in Chrome. This is a full-tab setup, not a toolbar popup.</p>
+      <p class="intro">Connect the original unpacked extension folder once to install signed official updates entirely in Chrome. This is a full-tab setup, not a toolbar popup.</p>
     </div>
 
-    <div class="beta-warning" aria-labelledby="beta-warning-title">
-      <h2 id="beta-warning-title">One folder. One browser/profile. Beta risks.</h2>
+    <div class="safety-warning" aria-labelledby="safety-warning-title">
+      <h2 id="safety-warning-title">One folder. One browser/profile. Per-file updates.</h2>
       <p>Use this folder only in this browser/profile. Other browsers or profiles cannot be coordinated. Updating several files is not atomic: interruption, local edits, or lost permission can leave an update incomplete. Recovery has limits. Keep a separate known-good backup.</p>
       <p>No Store installation, executable, PowerShell, or Windows helper is used by this updater.</p>
     </div>
@@ -35,42 +34,50 @@
     <div class="setup-layout">
       <div class="setup-workflow">
         <section class="setup-section" aria-labelledby="folder-title">
-          <div class="section-heading"><span class="step-number" aria-hidden="true">01</span><div><h2 id="folder-title">Connect the original folder</h2><p>Select the <code>allen-toolbox</code> folder containing <code>manifest.json</code>, not its parent or a second copy.</p></div></div>
-          <p id="folder-help">Chrome will ask you to grant read/write access. The updater checks that this is the currently loaded extension folder before writing extension code. Selecting a folder does not install an update.</p>
+          <div class="section-heading"><span class="step-number" aria-hidden="true">01</span><div><h2 id="folder-title">Remember the original folder</h2><p>For first-time setup, select the <code>allen-toolbox</code> folder containing <code>manifest.json</code>, not its parent or a second copy.</p></div></div>
+          <p id="folder-help">Choose once and grant Chrome read/write access. The updater checks that this is the currently loaded extension folder and remembers its handle in this browser/profile. Connecting or restoring access does not install an update.</p>
           <label class="acknowledgement" for="single-profile-ack">
-            <input id="single-profile-ack" type="checkbox" aria-describedby="beta-warning-title folder-help">
-            <span>I use this folder only in this browser/profile and accept beta testing risks</span>
+            <input id="single-profile-ack" type="checkbox" aria-describedby="safety-warning-title acknowledgement-help">
+            <span>I use this folder only in this browser/profile and understand the per-file update and recovery limits</span>
           </label>
-          <div class="actions"><button id="choose-folder" class="button beta-action" type="button" aria-describedby="folder-help picker-support" disabled>Choose extension folder</button></div>
+          <p id="acknowledgement-help" class="helper">Required when choosing a folder or turning automatic file installation on. Restoring access to the remembered folder does not require a new acknowledgement.</p>
+          <div class="actions">
+            <button id="restore-folder-access" class="button primary-action" type="button" aria-describedby="saved-folder-help restore-support" disabled hidden>Restore write access</button>
+            <button id="choose-folder" class="button primary-action" type="button" aria-describedby="folder-help picker-support" disabled>Choose extension folder</button>
+          </div>
+          <p id="restore-support" class="status warning" role="status" aria-live="polite" hidden></p>
           <p id="picker-support" class="status warning" role="status" aria-live="polite" hidden></p>
           <p id="folder-status" class="status" role="status" aria-live="polite" aria-atomic="true">Reading the saved folder connection...</p>
           <dl class="folder-facts">
+            <div><dt>Saved connection</dt><dd id="folder-connection">Reading saved connection...</dd></div>
             <div><dt>Folder</dt><dd id="folder-name">Not selected</dd></div>
             <div><dt>Folder version</dt><dd id="folder-version">Not connected</dd></div>
-            <div><dt>Running build</dt><dd id="running-version">2.3.1 BETA</dd></div>
+            <div><dt>Running build</dt><dd id="running-version">Reading running build...</dd></div>
             <div><dt>Read/write access</dt><dd id="folder-permission">Not granted</dd></div>
           </dl>
-          <p class="helper">If Chrome revokes folder permission, updates pause. Choose the same extension folder again to reconnect; this page never silently requests permission.</p>
+          <p id="saved-folder-help" class="helper">Folder remembered; if Chrome revokes permission, Restore write access reapproves the saved folder. Choose again only if it moved or was disconnected. This page never silently requests permission.</p>
+          <p id="storage-status" class="helper" role="status" aria-live="polite" hidden>The folder handle is saved in this profile's IndexedDB. Clearing browser data or storage eviction can remove it. Remembering a folder does not guarantee permanent Chrome permission.</p>
         </section>
 
         <section class="setup-section" aria-labelledby="automatic-title">
           <div class="section-heading"><span class="step-number" aria-hidden="true">02</span><div><h2 id="automatic-title">Decide how files are installed</h2><p>Automatic file installation is off by default.</p></div></div>
-          <button id="automatic-install" class="automatic-toggle" type="button" role="switch" aria-checked="false" aria-label="Automatic beta file installation" aria-describedby="automatic-help automatic-state" disabled>
-            <span><strong>Install beta files automatically</strong><span id="automatic-state" class="toggle-description">Off. Only an explicit install can change extension files.</span></span>
+          <button id="automatic-install" class="automatic-toggle" type="button" role="switch" aria-checked="false" aria-label="Automatic file installation" aria-describedby="automatic-help automatic-state" disabled>
+            <span><strong>Install verified files automatically</strong><span id="automatic-state" class="toggle-description">Off. Only an explicit install can change extension files.</span></span>
             <span class="switch-track" aria-hidden="true"><i></i></span>
           </button>
-          <p id="automatic-help" class="helper">Enable only after connecting the folder, granting read/write access, and acknowledging the beta risks. When on, verified beta releases may replace files without another install click while the browser is open. Active toolbox work defers installation; revoked permission pauses it. This does not make cross-profile use safe.</p>
+          <p id="automatic-help" class="helper">Enable only after connecting the folder, granting read/write access, and acknowledging the safety limits. When on, verified releases may replace files without another install click while the browser is open. Active toolbox work defers installation; revoked permission pauses it without resetting your choice. You can turn this off without folder permission. This does not make cross-profile use safe.</p>
         </section>
 
         <section class="setup-section" aria-labelledby="release-title">
-          <div class="section-heading"><span class="step-number" aria-hidden="true">03</span><div><h2 id="release-title">Review a beta update</h2><p>Checking release metadata does not grant folder access.</p></div></div>
+          <div class="section-heading"><span class="step-number" aria-hidden="true">03</span><div><h2 id="release-title">Check official releases</h2><p>Automatic release checks and automatic file installation are separate settings.</p></div></div>
+          <p id="automatic-check-state" class="helper" role="status" aria-live="polite">Reading automatic release-check setting...</p>
           <div class="actions">
-            <button id="check-beta" class="button" type="button" disabled>Check for beta update</button>
-            <a id="view-beta-release" class="button quiet" href="https://github.com/supreme12343/allen-toolbox/releases" target="_blank" rel="noopener noreferrer" hidden>View beta release</a>
+            <button id="check-beta" class="button" type="button" disabled>Check for updates</button>
+            <a id="view-beta-release" class="button quiet" href="https://github.com/supreme12343/allen-toolbox/releases" target="_blank" rel="noopener noreferrer" hidden>View checked release</a>
           </div>
-          <p id="update-status" class="status" role="status" aria-live="polite" aria-atomic="true">Reading beta update status...</p>
-          <button id="install-beta" class="button beta-action" type="button" aria-describedby="install-help" disabled>Install checked beta update</button>
-          <p id="install-help" class="helper">Acknowledge the risks, connect the original folder, and check for an available beta first. Installation goes through the background's active-work gate and the core's signature and folder checks. Keep the browser open. Chrome may still run the previous build until the extension reloads.</p>
+          <p id="update-status" class="status" role="status" aria-live="polite" aria-atomic="true">Reading update status...</p>
+          <button id="install-beta" class="button primary-action" type="button" aria-describedby="install-help" disabled>Install checked release</button>
+          <p id="install-help" class="helper">Connect the original folder and check for an available release first. Checking never grants folder permission; if automatic file installation is already on, a check may also trigger a verified installation. All installations go through the background's active-work gate and the core's signature and folder checks. Keep the browser open. Chrome may still run the previous build until the extension reloads.</p>
         </section>
 
         <section id="folder-recovery" class="recovery-notice" aria-labelledby="recovery-title" hidden>
@@ -93,9 +100,9 @@
         <section class="aside-section">
           <h2>Official source, fixed</h2>
           <a id="update-source" class="source-link" href="https://github.com/supreme12343/allen-toolbox" target="_blank" rel="noopener noreferrer">https://github.com/supreme12343/allen-toolbox</a>
-          <p>This beta cannot be pointed at another repository. Packages are downloaded and verified by the background/core, not by this setup page.</p>
-          <a class="text-link" href="https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0" target="_blank" rel="noopener noreferrer">View stable 2.3.0</a>
-          <p class="helper">Stable 2.3 remains separate from this experimental beta channel.</p>
+          <p>The updater cannot be pointed at another repository. Packages are downloaded and verified by the background/core, not by this setup page.</p>
+          <a class="text-link" href="https://github.com/supreme12343/allen-toolbox/releases" target="_blank" rel="noopener noreferrer">View official releases</a>
+          <p class="helper">Use a reviewed manual ZIP update if a release needs new permissions or changes the independent recovery files.</p>
         </section>
         <section class="aside-section">
           <h2>Recovery and Help</h2>
@@ -110,7 +117,7 @@
         </section>
       </aside>
     </div>
-    <noscript><p class="beta-warning">JavaScript is required for setup. No folder access has been requested.</p></noscript>
+    <noscript><p class="safety-warning">JavaScript is required for setup. No folder access has been requested.</p></noscript>
   </main>
   <footer class="page-footer"><span>Browser-only. Explicit folder permission.</span><span>Credits to <strong>Supreme</strong></span></footer>
   <script type="module" src="./updater.js"></script>

@@ -42,7 +42,7 @@ export async function verifyPublishedAssets(state, repository, fetcher = fetch) 
 export async function publishRelease({ repository, commit, release, run = execute, verifyPublished = verifyPublishedAssets }) {
   const repo = githubRepository(repository), slug = repo.slice('https://github.com/'.length);
   versionParts(release.version);
-  const identity = releaseIdentity(release.version, release.prerelease === true);
+  const identity = releaseIdentity(release.version, release.prerelease === true, release.versionName || '');
   if (repo !== OFFICIAL_REPOSITORY || release.repository !== repo || release.tag !== identity.tag || release.filename !== identity.filename ||
       !/^[a-f\d]{64}$/.test(release.checksum) || !Number.isSafeInteger(release.blob?.size) || release.blob.size <= 0 ||
       !(release.signature instanceof Uint8Array) || release.signature.length < 256 || release.signature.length > 512 ||

@@ -343,9 +343,9 @@ try {
   assert.match(rejectedSource.error, /source is fixed/);
   const fixedSource = await popup.evaluate(() => chrome.runtime.sendMessage({ type: 'updates:get' }));
   assert.equal(fixedSource.repository, OFFICIAL_REPOSITORY);
-  assert.equal(await popup.locator('#update-install').isHidden(), true, 'An unsigned helper must not be offered for installation');
-  assert.match(await popup.locator('#native-updater-status').textContent(), fixtureBeta ? /BETA experiment|BETA folder/ : /unavailable|No executable installer/);
-  assert.equal(await popup.locator('#folder-updater-setup').isVisible(), fixtureBeta);
+  assert.equal(await popup.locator('#update-install').isHidden(), true, 'A disconnected folder must not be offered for installation');
+  assert.match(await popup.locator('#native-updater-status').textContent(), /Connect the original extension folder|Folder remembered/);
+  assert.equal(await popup.locator('#folder-updater-setup').isVisible(), true);
   await popup.waitForFunction(() => document.getElementById('update-auto').getAttribute('aria-checked') === 'true');
   await popup.locator('#update-check').click();
   await popup.locator('#update-release').waitFor({ state: 'visible' });

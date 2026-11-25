@@ -11,7 +11,6 @@ import { selectOutput } from './shared/hls.js';
 import { DownloadError } from './shared/download.js';
 import { initUpdates } from './shared/updates.js';
 import { initBuiltinUpdater } from './shared/builtin-updater.js';
-import { isBetaManifest } from './shared/update-meta.js';
 import { initGM } from './gm/gm-bg.js';
 
 const ALLEN_MATCH = '*://*.allenoverseas.com/*';
@@ -879,7 +878,7 @@ async function handle(msg, sender) {
       if (msg.type === 'folder:forget') return folderUpdater.forget();
       if (msg.type === 'folder:recover') return updates.recover();
       if (msg.type === 'updates:download') return updates.download();
-      return updates.status();
+      return updates.status({ refresh: true });
     }
     case 'tool': return runTool(msg.tabId, msg.tool, msg.value);
     case 'capture-tab': return captureTab(msg.tabId);
@@ -1176,7 +1175,7 @@ const updateBusy = async () => {
   return downloading || editing || downloadBlobs.size > 0;
 };
 const folderUpdater = initBuiltinUpdater({ offscreen, busy: updateBusy });
-const updates = initUpdates({ acquireRequest, releaseRequest, busy: updateBusy, ...(isBetaManifest(chrome.runtime.getManifest()) ? { nativeUpdater: folderUpdater } : {}) });
+const updates = initUpdates({ acquireRequest, releaseRequest, busy: updateBusy, nativeUpdater: folderUpdater });
 
 /* ---- popup state ---- */
 async function popupState(tabId) {

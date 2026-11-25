@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign, webcrypto } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
-import { createFolderUpdater, FOLDER_UPDATER_DB, FOLDER_UPDATER_LOCK, FOLDER_UPDATER_MARKER } from '../shared/folder-updater.js';
+import { createFolderUpdater, prepareFolderPermissionRequest, FOLDER_UPDATER_DB, FOLDER_UPDATER_LOCK, FOLDER_UPDATER_MARKER } from '../shared/folder-updater.js';
 import { createZip } from '../shared/zip.js';
 import { UPDATE_REPOSITORY, RECOVERY_BOOTSTRAP } from '../shared/update-package.js';
 
@@ -21,12 +21,23 @@ function namedError(name) { const error = new Error('In-memory fixture: ' + name
 class MemoryDirectory {
   constructor(env, node, name = 'fixture-extension', path = '') { this.kind = 'directory'; this.name = name; this.env = env; this.node = node; this.path = path; }
   allowed() { if (this.env.permission !== 'granted') throw namedError('NotAllowedError'); }
-  async queryPermission(options) { assert.deepEqual({ ...options }, { mode: 'readwrite' }); this.env.queries++; return this.env.permission; }
-  async requestPermission(options) {
-    assert.deepEqual({ ...options }, { mode: 'readwrite' }); this.env.permissionRequests++;
-    if (this.env.userActivation != null) assert.equal(this.env.userActivation, true, 'permission must be requested before yielding the click');
-    if (this.env.requestedPermission) this.env.permission = this.env.requestedPermission;
+  async queryPermission(options) {
+    assert.deepEqual({ ...options }, { mode: 'readwrite' }); this.env.queries++;
+    if (this.env.queryError) throw this.env.queryError;
     return this.env.permission;
+  }
+  requestPermission(options) {
+    assert.deepEqual({ ...options }, { mode: 'readwrite' }); this.env.permissionRequests++; this.env.events.push(['permission-request']);
+    if (this.env.userActivation != null) assert.equal(this.env.userActivation, true, 'permission must be requested before yielding the click');
+    if (this.env.requestError) throw this.env.requestError;
+    if (this.env.requestOverride) return this.env.requestOverride();
+    if (this.env.requestedPermission) this.env.permission = this.env.requestedPermission;
+    return Promise.resolve(this.env.permission);
+  }
+  async isSameEntry(other) {
+    this.env.events.push(['same-entry']);
+    if (this.env.sameEntryError) throw this.env.sameEntryError;
+    return other?.env === this.env && other.node === this.node;
   }
   async resolve(entry) {
     this.env.events.push(['resolve', entry.path]);
@@ -96,7 +107,11 @@ class MemoryFile {
 }
 
 function clone(value) {
-  if (value instanceof MemoryDirectory) return new MemoryDirectory(value.env, value.node, value.name, value.path);
+  if (value instanceof MemoryDirectory) {
+    const handle = new MemoryDirectory(value.env, value.node, value.name, value.path);
+    for (const name of ['queryPermission', 'requestPermission', 'isSameEntry']) if (Object.hasOwn(value, name)) handle[name] = value[name];
+    return handle;
+  }
   if (value instanceof Blob) return value.slice();
   if (value instanceof Uint8Array) return new Uint8Array(value);
   if (Array.isArray(value)) return value.map(clone);
@@ -107,19 +122,24 @@ function clone(value) {
 // Serial, transactional, structured-clone IDB fixture. No filesystem or Chrome storage.
 class MemoryIDB {
   constructor() {
-    this.stores = new Map(); this.tail = Promise.resolve(); this.opens = [];
+    this.stores = new Map(); this.tail = Promise.resolve(); this.opens = []; this.transactions = [];
     this.db = { objectStoreNames: { contains: (name) => this.stores.has(name) }, createObjectStore: (name) => this.stores.set(name, new Map()),
       transaction: (names, mode, options) => this.transaction(names, mode, options), close() {} };
   }
   open(name, version) {
     this.opens.push([name, version]); const request = {};
-    queueMicrotask(() => { request.result = this.db; if (!this.stores.size) request.onupgradeneeded?.(); request.onsuccess?.(); });
+    queueMicrotask(() => {
+      if (this.failOpen) { this.failOpen = false; request.onerror?.(); return; }
+      request.result = this.db; if (!this.stores.size) request.onupgradeneeded?.(); request.onsuccess?.();
+    });
     return request;
   }
   get(name) { return this.stores.get(name)?.get('singleton'); }
   set(name, value) { this.stores.get(name).set('singleton', clone(value)); }
   transaction(names, mode, options) {
     if (mode === 'readwrite') assert.equal(options?.durability, 'strict');
+    this.transactions.push([names, mode]); this.onTransaction?.(names, mode);
+    if (this.failTransaction) { this.failTransaction = false; throw namedError('InvalidStateError'); }
     const selected = Array.isArray(names) ? names : [names], operations = []; let aborted = false, working;
     const tx = { abort: () => { aborted = true; }, objectStore: (name) => {
       assert.ok(selected.includes(name));
@@ -128,6 +148,7 @@ class MemoryIDB {
           if (operation === 'get') request.result = clone(working.get(name).get(key));
           else if (operation === 'put') {
             if (name === 'journal' && this.failJournal) { this.failJournal = false; throw namedError('QuotaExceededError'); }
+            if (name === 'state' && this.failState) { this.failState = false; throw namedError('QuotaExceededError'); }
             working.get(name).set(key, clone(value));
           } else working.get(name).delete(key);
           request.onsuccess?.();
@@ -149,10 +170,15 @@ class MemoryIDB {
 }
 
 class MemoryLocks {
-  constructor() { this.tail = Promise.resolve(); this.calls = []; this.active = 0; }
+  constructor() { this.tail = Promise.resolve(); this.calls = []; this.active = 0; this.pending = 0; }
   request(name, options, callback) {
-    assert.equal(name, FOLDER_UPDATER_LOCK); assert.deepEqual({ ...options }, { mode: 'exclusive' }); this.calls.push(name);
-    const run = this.tail.then(async () => { assert.equal(this.active++, 0); try { return await callback(); } finally { this.active--; } });
+    assert.equal(name, FOLDER_UPDATER_LOCK); assert.deepEqual({ ...options }, { mode: 'exclusive', ...(options.ifAvailable ? { ifAvailable: true } : {}) }); this.calls.push(name);
+    if (options.ifAvailable && (this.active || this.pending)) return Promise.resolve(callback(null));
+    this.pending++;
+    const run = this.tail.then(async () => {
+      this.pending--; assert.equal(this.active++, 0);
+      try { return await callback({ name, mode: 'exclusive' }); } finally { this.active--; }
+    });
     this.tail = run.catch(() => {}); return run;
   }
 }
@@ -233,6 +259,11 @@ function harness({ root = memoryFolder(), idb = new MemoryIDB(), locks = new Mem
 }
 
 function noRuntimeWrites(env) { assert.equal(env.events.filter(([action, path]) => ['open', 'write', 'close', 'remove'].includes(action) && !path.startsWith('.allen-updater-probe-') && path !== FOLDER_UPDATER_MARKER).length, 0); }
+function noFolderWrites(env) { assert.equal(env.events.filter(([action]) => ['mkdir', 'create', 'open', 'write', 'close', 'remove', 'abort'].includes(action)).length, 0); }
+function requestAccess(prepared, env) {
+  env.userActivation = true;
+  try { return prepared.request(); } finally { env.userActivation = false; }
+}
 function assertOriginals(root, original = fixtureFiles()) { for (const [path, data] of original) assert.deepEqual(root.bytes(path), data, path); }
 
 test('unavailable browser exposes the exact sanitized state without storage, permissions or native calls', async () => {
@@ -298,6 +329,308 @@ test('revoked permission surfaces needs-permission without background prompts or
   assert.equal((await h.core.getFolderUpdateState()).state, 'needs-permission');
   const state = await h.core.applyFolderRelease(release); assert.equal(state.state, 'needs-permission'); assert.equal(state.permission, 'prompt');
   assert.equal(h.requests.length, 0); assert.equal(h.env.permissionRequests, 0); noRuntimeWrites(h.env);
+});
+
+test('automatic attempts recheck saved opt-in after lock admission without altering the connection', async () => {
+  const h = harness(); await h.connect({ automatic: true }); const release = await h.prepare();
+  await h.core.setFolderAutomatic(false);
+  const saved = clone(h.idb.get('state'));
+  h.env.events.length = 0; h.requests.length = 0;
+  const state = await h.core.applyFolderRelease(release, { automatic: true });
+  assert.equal(state.error, 'AUTOMATIC_DISABLED'); assert.equal(state.state, 'deferred'); assert.equal(state.connected, true); assert.equal(state.autoInstall, false);
+  assert.deepEqual(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), undefined); assert.equal(h.requests.length, 0); noRuntimeWrites(h.env);
+});
+
+test('explicit manual installation remains possible when automatic file installation is off', async () => {
+  const h = harness(); await h.connect({ automatic: false }); const release = await h.prepare();
+  const state = await h.core.applyFolderRelease(release, { automatic: false });
+  assert.equal(state.state, 'updated'); assert.equal(state.error, ''); assert.equal(state.autoInstall, false);
+});
+
+test('permission preparation is unavailable without a connected, acknowledged handle and its permission/identity APIs', async () => {
+  assert.equal(typeof prepareFolderPermissionRequest, 'function'); assert.equal(await prepareFolderPermissionRequest(), null);
+  const h = harness(); h.env.userActivation = false;
+  assert.equal(await h.core.prepareFolderPermissionRequest(), null); assert.equal(h.env.permissionRequests, 0); noFolderWrites(h.env);
+  await h.connect({ automatic: true }); const saved = clone(h.idb.get('state'));
+  for (const api of ['queryPermission', 'requestPermission', 'isSameEntry']) {
+    const config = clone(saved); config.handle[api] = undefined; h.idb.set('state', config);
+    const stored = h.idb.get('state'); assert.equal(await h.core.prepareFolderPermissionRequest(), null);
+    assert.equal(h.idb.get('state'), stored); assert.equal(stored.autoInstall, true);
+  }
+  h.idb.set('state', { ...saved, singleProfileAcknowledged: false });
+  assert.equal(await h.core.prepareFolderPermissionRequest(), null);
+  const unsupported = createFolderUpdater({ ...h.dependencies, locks: null }); assert.equal(await unsupported.prepareFolderPermissionRequest(), null);
+  assert.equal(h.env.permissionRequests, 0); assert.equal(h.requests.length, 0); noFolderWrites(h.env);
+});
+
+test('unclicked preparation never prompts and the callback requests permission before any async DB/lock/file work', async () => {
+  const h = harness(); await h.connect({ automatic: true }); h.env.permission = 'prompt'; h.env.userActivation = false;
+  const prepared = await h.core.prepareFolderPermissionRequest(); assert.deepEqual(Object.keys(prepared), ['request']);
+  assert.equal(JSON.stringify(prepared), '{}'); assert.equal(h.env.permissionRequests, 0); assert.equal(h.env.events.length, 0);
+  const transactions = h.idb.transactions.length, lockCalls = h.locks.calls.length; h.env.requestedPermission = 'granted';
+  const restoring = requestAccess(prepared, h.env);
+  assert.equal(h.env.permissionRequests, 1); assert.deepEqual(h.env.events, [['permission-request']]);
+  assert.equal(h.idb.transactions.length, transactions); assert.equal(h.locks.calls.length, lockCalls);
+  const state = await restoring; assert.equal(state.state, 'ready'); assert.equal(state.permission, 'granted'); assert.equal(state.autoInstall, true);
+  assert.deepEqual(Object.keys(state).sort(), Object.keys(await h.core.getFolderUpdateState()).sort());
+  assert.ok(!('handle' in state)); assert.ok(!('request' in state)); assert.ok(!('profileId' in state));
+  noFolderWrites(h.env); assert.equal(h.requests.length, 0); assert.equal(h.reloads, 0); assert.equal(h.nativeCalls, 0);
+});
+
+test('a cloned remembered handle survives contexts and restores revoked write access without reconnect/probe/marker/baseline reset', async () => {
+  for (const automatic of [false, true]) {
+    const h = harness({ root: memoryFolder(fixtureFiles('2.3.2', true)) }); await h.connect({ automatic });
+    const markerBytes = h.root.bytes(FOLDER_UPDATER_MARKER); h.env.permission = 'prompt';
+    assert.equal((await h.core.applyFolderRelease()).error, 'PERMISSION_REQUIRED');
+    const saved = clone(h.idb.get('state')), restarted = createFolderUpdater(h.dependencies);
+    const pending = await restarted.getFolderUpdateState(); assert.equal(pending.connected, true); assert.equal(pending.autoInstall, automatic);
+    assert.equal(pending.state, 'needs-permission'); assert.equal(pending.installedVersion, '2.3.2'); assert.equal(h.env.permissionRequests, 0);
+    const prepared = await restarted.prepareFolderPermissionRequest(); h.env.requestedPermission = 'granted';
+    h.idb.onTransaction = (names, mode) => { if (mode === 'readwrite') assert.equal(h.locks.active, 1, 'DB mutations require the exclusive lock'); };
+    const restored = await requestAccess(prepared, h.env), current = h.idb.get('state');
+    assert.equal(restored.connected, true); assert.equal(restored.autoInstall, automatic); assert.equal(restored.state, 'ready'); assert.equal(restored.error, '');
+    assert.equal(current.profileId, saved.profileId); assert.equal(current.installationId, saved.installationId); assert.equal(current.singleProfileAcknowledged, true);
+    assert.deepEqual(current.baseline, saved.baseline); assert.equal(current.markerHash, saved.markerHash); assert.equal(current.installedVersionName, '2.3.2 BETA');
+    assert.notEqual(current.handle, h.root); assert.equal(current.handle.node, h.root.node); assert.equal(current.handle.env, h.env);
+    assert.deepEqual(h.root.bytes(FOLDER_UPDATER_MARKER), markerBytes); assert.equal(h.idb.get('journal'), undefined);
+    assert.equal((await createFolderUpdater(h.dependencies).getFolderUpdateState()).autoInstall, automatic);
+    assert.ok(h.idb.opens.every(([name, version]) => name === FOLDER_UPDATER_DB && version === 1));
+    assert.deepEqual([...h.idb.stores.keys()].sort(), ['journal', 'state']); noFolderWrites(h.env); assert.equal(h.requests.length, 0);
+  }
+});
+
+test('denial, cancellation and synchronous/asynchronous permission errors retain connection, automatic opt-in and any journal', async () => {
+  for (const pending of [false, true]) {
+    const h = pending ? await interrupted({ automatic: true }) : harness(); if (!pending) await h.connect({ automatic: true });
+    const saved = h.idb.get('state'), journal = h.idb.get('journal'), markerBytes = h.root.bytes(FOLDER_UPDATER_MARKER);
+    h.env.permission = 'prompt'; h.env.events.length = 0; h.requests.length = 0;
+    const prepared = await h.core.prepareFolderPermissionRequest();
+    for (const outcome of ['denied', 'prompt', 'invalid-reply', 'NotAllowedError', 'AbortError', 'SecurityError', 'OperationError', 'async-error']) {
+      h.env.permission = 'prompt'; h.env.requestError = null; h.env.requestOverride = null; h.env.requestedPermission = null;
+      if (['denied', 'prompt'].includes(outcome)) h.env.requestedPermission = outcome;
+      else if (outcome === 'invalid-reply') h.env.requestOverride = () => Promise.resolve('unexpected');
+      else if (outcome === 'async-error') h.env.requestOverride = () => Promise.reject(new Error('private fixture details'));
+      else h.env.requestError = namedError(outcome);
+      const state = await requestAccess(prepared, h.env);
+      assert.equal(state.connected, true); assert.equal(state.autoInstall, true); assert.equal(state.state, pending ? 'needs-recovery' : 'needs-permission');
+      assert.equal(state.recoveryPending, pending); assert.notEqual(state.permission, 'granted'); assert.ok(!state.message.includes('private fixture'));
+      assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), journal); assert.deepEqual(h.root.bytes(FOLDER_UPDATER_MARKER), markerBytes);
+    }
+    noFolderWrites(h.env); assert.equal(h.requests.length, 0); assert.equal(h.reloads, 0); assert.equal(h.nativeCalls, 0);
+  }
+});
+
+test('queryPermission errors and transient IndexedDB failures never erase a durable handle, automatic setting or journal', async () => {
+  for (const pending of [false, true]) {
+    const h = pending ? await interrupted({ automatic: true }) : harness(); if (!pending) await h.connect({ automatic: true });
+    const saved = h.idb.get('state'), journal = h.idb.get('journal'); h.env.events.length = 0; h.requests.length = 0;
+    for (const name of ['OperationError', 'NotAllowedError']) {
+      h.env.queryError = namedError(name);
+      const state = await createFolderUpdater(h.dependencies).getFolderUpdateState();
+      assert.equal(state.connected, true); assert.equal(state.autoInstall, true); assert.equal(state.state, pending ? 'needs-recovery' : 'needs-permission');
+      assert.equal(state.permission, name === 'NotAllowedError' ? 'denied' : 'unavailable');
+      if (name === 'OperationError') assert.equal(await h.core.prepareFolderPermissionRequest(), null);
+      assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), journal);
+    }
+    h.env.queryError = null; h.idb.failTransaction = true;
+    const unavailable = await h.core.getFolderUpdateState(); assert.equal(unavailable.error, 'STORAGE_FAILED'); assert.equal(unavailable.recoveryPending, true);
+    h.idb.failOpen = true; const restarted = createFolderUpdater(h.dependencies);
+    assert.equal((await restarted.getFolderUpdateState()).error, 'STORAGE_FAILED');
+    const recovered = await restarted.getFolderUpdateState(); assert.equal(recovered.connected, true); assert.equal(recovered.autoInstall, true);
+    assert.equal(recovered.recoveryPending, pending); assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), journal);
+    assert.equal(h.env.permissionRequests, 0); assert.equal(h.requests.length, 0); noFolderWrites(h.env);
+  }
+});
+
+test('a granted reply still requires a fresh permission check before folder verification', async () => {
+  for (const pending of [false, true]) for (const mode of ['prompt', 'query-error']) {
+    const h = pending ? await interrupted({ automatic: true }) : harness(); if (!pending) await h.connect({ automatic: true });
+    const saved = h.idb.get('state'), journal = h.idb.get('journal'); h.env.permission = 'prompt';
+    const prepared = await h.core.prepareFolderPermissionRequest(); h.env.events.length = 0; h.requests.length = 0;
+    h.env.requestOverride = () => {
+      if (mode === 'query-error') h.env.queryError = namedError('OperationError');
+      return Promise.resolve('granted');
+    };
+    const state = await requestAccess(prepared, h.env);
+    assert.equal(state.state, pending ? 'needs-recovery' : 'needs-permission'); assert.notEqual(state.permission, 'granted'); assert.equal(state.autoInstall, true);
+    assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), journal);
+    assert.deepEqual(h.env.events, [['permission-request'], ['same-entry']]); noFolderWrites(h.env); assert.equal(h.requests.length, 0);
+  }
+});
+
+test('restore DB read/write failures report unknown recovery state and keep the same saved connection for a retry', async () => {
+  const h = harness(); await h.connect({ automatic: true }); h.env.permission = 'prompt';
+  await h.core.applyFolderRelease(); const saved = h.idb.get('state'), prepared = await h.core.prepareFolderPermissionRequest(); h.env.requestedPermission = 'granted';
+  for (const mode of ['read', 'write']) {
+    if (mode === 'read') h.idb.failTransaction = true; else h.idb.failState = true;
+    const state = await requestAccess(prepared, h.env);
+    assert.equal(state.error, 'STORAGE_FAILED'); assert.equal(state.state, 'needs-recovery'); assert.equal(state.recoveryPending, true);
+    assert.equal(state.connected, true); assert.equal(state.autoInstall, true); assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), undefined);
+  }
+  assert.equal((await requestAccess(prepared, h.env)).state, 'ready'); assert.equal(h.idb.get('state').installationId, saved.installationId);
+  assert.deepEqual(h.idb.get('state').baseline, saved.baseline); noFolderWrites(h.env); assert.equal(h.requests.length, 0);
+  const pending = await interrupted({ automatic: true }), stored = pending.idb.get('state'), journal = pending.idb.get('journal');
+  const preparedRecovery = await pending.core.prepareFolderPermissionRequest(); pending.env.requestedPermission = 'granted'; pending.idb.failTransaction = true;
+  pending.env.events.length = 0; pending.requests.length = 0;
+  assert.equal((await requestAccess(preparedRecovery, pending.env)).error, 'STORAGE_FAILED');
+  assert.equal(pending.idb.get('state'), stored); assert.equal(pending.idb.get('journal'), journal); noFolderWrites(pending.env); assert.equal(pending.requests.length, 0);
+});
+
+test('stale prepared callbacks cannot adopt an old folder after profile, installation, handle or acknowledgment replacement', async () => {
+  for (const change of ['disconnect', 'profile', 'installation', 'handle', 'acknowledgment', 'schema']) {
+    const h = harness(); await h.connect({ automatic: true }); const original = clone(h.idb.get('state')), markerBytes = h.root.bytes(FOLDER_UPDATER_MARKER);
+    h.env.permission = 'prompt'; const prepared = await h.core.prepareFolderPermissionRequest();
+    const replacement = clone(original); let other;
+    if (change === 'disconnect') Object.assign(replacement, { handle: null, installationId: null, singleProfileAcknowledged: false, autoInstall: false });
+    if (change === 'profile') replacement.profileId = uuid();
+    if (change === 'installation') replacement.installationId = uuid();
+    if (change === 'acknowledgment') replacement.singleProfileAcknowledged = false;
+    if (change === 'schema') replacement.schema = 2;
+    if (change === 'handle') {
+      other = memoryFolder(); other.set(FOLDER_UPDATER_MARKER, markerBytes); replacement.handle = other;
+    }
+    h.idb.set('state', replacement); const saved = h.idb.get('state'); h.env.events.length = 0; h.env.requestedPermission = 'granted';
+    const state = await requestAccess(prepared, h.env);
+    assert.equal(state.error, 'CONNECTION_CHANGED'); assert.equal(state.state, 'error'); assert.equal(h.idb.get('state'), saved);
+    assert.equal(state.connected, change !== 'disconnect'); assert.equal(state.autoInstall, change !== 'disconnect');
+    assert.deepEqual(h.env.events, [['permission-request']], 'no old-folder identity/read/write work after the stored connection changes');
+    assert.deepEqual(h.root.bytes(FOLDER_UPDATER_MARKER), markerBytes); noFolderWrites(h.env); assert.equal(h.requests.length, 0);
+    if (other) { assert.equal(other.env.permissionRequests, 0); noFolderWrites(other.env); assert.deepEqual(other.bytes(FOLDER_UPDATER_MARKER), markerBytes); }
+  }
+});
+
+test('changes while the permission prompt is pending are rechecked and current automatic preferences are never overwritten', async () => {
+  for (const change of ['installation', 'automatic']) {
+    const h = harness(); await h.connect({ automatic: true }); h.env.permission = 'prompt';
+    const prepared = await h.core.prepareFolderPermissionRequest(); let grant;
+    h.env.requestOverride = () => new Promise((resolve) => { grant = resolve; });
+    const restoring = requestAccess(prepared, h.env); assert.equal(h.env.permissionRequests, 1); assert.deepEqual(h.env.events, [['permission-request']]);
+    const config = clone(h.idb.get('state'));
+    if (change === 'installation') config.installationId = uuid(); else config.autoInstall = false;
+    h.idb.set('state', config); const saved = h.idb.get('state'); h.env.permission = 'granted'; grant('granted');
+    const state = await restoring; assert.equal(h.idb.get('state'), saved);
+    if (change === 'installation') { assert.equal(state.error, 'CONNECTION_CHANGED'); assert.deepEqual(h.env.events, [['permission-request']]); }
+    else { assert.equal(state.state, 'ready'); assert.equal(state.autoInstall, false); assert.equal(saved.autoInstall, false); }
+    noFolderWrites(h.env); assert.equal(h.requests.length, 0);
+  }
+});
+
+test('permission restoration detects local tracked edits and changed/missing/foreign markers without writing extension or ownership files', async () => {
+  for (const change of ['tracked-file', 'manifest', 'foreign-marker', 'changed-marker', 'missing-marker']) {
+    const h = harness(); await h.connect({ automatic: true }); const saved = clone(h.idb.get('state'));
+    h.env.permission = 'prompt'; const prepared = await h.core.prepareFolderPermissionRequest();
+    if (change === 'tracked-file') h.root.set('shared/helper.js', 'private local edit');
+    if (change === 'manifest') h.root.set('manifest.json', JSON.stringify({ ...h.running, version_name: 'private manifest edit' }));
+    if (change === 'foreign-marker') h.root.set(FOLDER_UPDATER_MARKER, JSON.stringify({ schema: 1, profileId: uuid(), installationId: uuid() }));
+    if (change === 'changed-marker') h.root.set(FOLDER_UPDATER_MARKER, JSON.stringify(JSON.parse(decoder.decode(h.root.bytes(FOLDER_UPDATER_MARKER))), null, 2));
+    if (change === 'missing-marker') h.root.node.entries.delete(FOLDER_UPDATER_MARKER);
+    const markerBytes = h.root.bytes(FOLDER_UPDATER_MARKER), tracked = h.root.bytes('shared/helper.js'), manifest = h.root.bytes('manifest.json');
+    h.env.requestedPermission = 'granted';
+    h.idb.onTransaction = (names, mode) => { if (mode === 'readwrite') assert.equal(h.locks.active, 1); };
+    const state = await requestAccess(prepared, h.env), expected = ['tracked-file', 'manifest'].includes(change) ? 'LOCAL_CHANGES' :
+      change === 'missing-marker' ? 'FOLDER_MOVED' : 'PROFILE_CONFLICT';
+    assert.equal(state.error, expected); assert.equal(state.state, 'error'); assert.equal(state.autoInstall, true); assert.equal(state.connected, true);
+    assert.equal(h.idb.get('state').profileId, saved.profileId); assert.equal(h.idb.get('state').installationId, saved.installationId);
+    assert.deepEqual(h.idb.get('state').baseline, saved.baseline); assert.equal(h.idb.get('state').markerHash, saved.markerHash);
+    assert.deepEqual(h.root.bytes(FOLDER_UPDATER_MARKER), markerBytes); assert.deepEqual(h.root.bytes('shared/helper.js'), tracked); assert.deepEqual(h.root.bytes('manifest.json'), manifest);
+    assert.equal((await h.core.getFolderUpdateState()).error, expected);
+    if (!['tracked-file', 'manifest'].includes(change)) assert.equal(await h.core.prepareFolderPermissionRequest(), null);
+    noFolderWrites(h.env); assert.equal(h.requests.length, 0); assert.equal(h.idb.get('journal'), undefined);
+  }
+});
+
+test('already-readable missing/foreign ownership makes preparation unavailable without losing the remembered connection', async () => {
+  for (const missing of [false, true]) {
+    const h = harness(); await h.connect({ automatic: true }); const saved = h.idb.get('state');
+    if (missing) h.root.node.entries.delete(FOLDER_UPDATER_MARKER);
+    else h.root.set(FOLDER_UPDATER_MARKER, JSON.stringify({ schema: 1, profileId: uuid(), installationId: uuid() }));
+    assert.equal(await h.core.prepareFolderPermissionRequest(), null); assert.equal(h.env.permissionRequests, 0); assert.equal(h.idb.get('state'), saved);
+    assert.equal((await h.core.getFolderUpdateState()).error, missing ? 'FOLDER_MOVED' : 'PROFILE_CONFLICT');
+    assert.equal(h.idb.get('state'), saved); assert.equal(saved.autoInstall, true); noFolderWrites(h.env);
+  }
+});
+
+test('transient folder verification failures are not misreported as a moved folder and retain the connection for retry', async () => {
+  const h = harness(); await h.connect({ automatic: true }); const saved = h.idb.get('state'); h.env.permission = 'prompt';
+  const prepared = await h.core.prepareFolderPermissionRequest(); h.env.requestedPermission = 'granted';
+  h.env.resolveOverride = () => { throw namedError('OperationError'); };
+  const state = await requestAccess(prepared, h.env); assert.equal(state.error, 'FOLDER_CHECK_FAILED'); assert.equal(state.state, 'error'); assert.equal(state.autoInstall, true);
+  assert.equal((await h.core.getFolderUpdateState()).error, 'FOLDER_CHECK_FAILED'); assert.equal(h.idb.get('state'), saved);
+  h.env.resolveOverride = null; assert.equal((await h.core.getFolderUpdateState()).state, 'ready');
+  assert.equal((await requestAccess(prepared, h.env)).state, 'ready'); assert.equal(h.idb.get('state'), saved); noFolderWrites(h.env); assert.equal(h.requests.length, 0);
+});
+
+test('grants with a pending journal validate durable baseline/ownership but never clear or restore the journal or local changes', async () => {
+  for (const mode of ['valid', 'local-changes', 'invalid-baseline', 'foreign-owner']) {
+    const h = await interrupted({ automatic: true });
+    if (mode === 'local-changes') {
+      h.idb.set('state', { ...h.idb.get('state'), lastState: 'error', lastError: 'LOCAL_CHANGES' });
+      h.root.set('background.js', 'local edit retained during recovery');
+    }
+    if (mode === 'invalid-baseline') {
+      const journal = clone(h.idb.get('journal')); journal.entries = journal.entries.filter((entry) => entry.path !== 'shared/helper.js'); h.idb.set('journal', journal);
+    }
+    if (mode === 'foreign-owner') h.root.set(FOLDER_UPDATER_MARKER, JSON.stringify({ schema: 1, profileId: uuid(), installationId: uuid() }));
+    const saved = h.idb.get('state'), journal = h.idb.get('journal'), helper = h.root.bytes('shared/helper.js'), background = h.root.bytes('background.js');
+    h.env.events.length = 0; h.requests.length = 0; const prepared = await createFolderUpdater(h.dependencies).prepareFolderPermissionRequest();
+    h.env.requestedPermission = 'granted'; const transactions = h.idb.transactions.length;
+    const state = await requestAccess(prepared, h.env);
+    assert.equal(state.state, 'needs-recovery'); assert.equal(state.recoveryPending, true); assert.equal(state.connected, true); assert.equal(state.autoInstall, true);
+    if (mode === 'local-changes') { assert.equal(state.error, 'LOCAL_CHANGES'); assert.match(state.message, /explicit restore/); }
+    if (mode === 'invalid-baseline') assert.equal(state.error, 'RECOVERY_INVALID');
+    if (mode === 'foreign-owner') assert.equal(state.error, 'PROFILE_CONFLICT');
+    assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), journal);
+    assert.ok(h.idb.transactions.slice(transactions).every(([, mode]) => mode === 'readonly'));
+    assert.deepEqual(h.root.bytes('shared/helper.js'), helper); assert.deepEqual(h.root.bytes('background.js'), background);
+    noFolderWrites(h.env); assert.equal(h.requests.length, 0); assert.equal(h.reloads, 0);
+  }
+});
+
+test('permission grants alone never clear an existing local-change or write-failure error, even with matching live bytes', async () => {
+  for (const code of ['LOCAL_CHANGES', 'WRITE_FAILED']) {
+    const h = harness(); await h.connect({ automatic: true }); h.idb.set('state', { ...h.idb.get('state'), lastState: 'error', lastError: code });
+    const saved = h.idb.get('state'); h.env.permission = 'prompt'; const prepared = await h.core.prepareFolderPermissionRequest(); h.env.requestedPermission = 'granted';
+    const state = await requestAccess(prepared, h.env); assert.equal(state.error, code); assert.equal(state.state, 'error'); assert.equal(state.autoInstall, true);
+    assert.equal(h.idb.get('state'), saved); assertOriginals(h.root); noFolderWrites(h.env);
+  }
+});
+
+test('repeated and cross-context permission restoration is idempotent and never creates an installation/update', async () => {
+  const h = harness(); await h.connect({ automatic: true }); const saved = h.idb.get('state'), second = createFolderUpdater(h.dependencies);
+  h.env.permission = 'prompt'; const first = await h.core.prepareFolderPermissionRequest(), other = await second.prepareFolderPermissionRequest();
+  h.env.requestedPermission = 'granted';
+  const concurrent = await Promise.all([requestAccess(first, h.env), requestAccess(other, h.env)]);
+  assert.ok(concurrent.some((state) => state.state === 'ready'));
+  assert.ok(concurrent.every((state) => state.state === 'ready' || state.state === 'deferred' && state.error === 'BUSY' && state.recoveryPending));
+  const restored = await requestAccess(first, h.env); assert.equal(restored.state, 'ready');
+  assert.deepEqual(await requestAccess(other, h.env), restored); assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), undefined);
+  noFolderWrites(h.env); assert.equal(h.requests.length, 0); assert.equal(h.reloads, 0); assert.equal(h.nativeCalls, 0);
+});
+
+test('a permission grant returns safe BUSY without DB/file work rather than waiting behind an active updater lock', async () => {
+  const h = harness(); await h.connect({ automatic: true }); const prepared = await h.core.prepareFolderPermissionRequest(), saved = h.idb.get('state');
+  const release = await h.prepare(), archive = h.responses.get(release.downloadUrl); let resume, started, timer;
+  const fetching = new Promise((resolve) => { started = resolve; }), gate = new Promise((resolve) => { resume = resolve; });
+  h.responses.set(release.downloadUrl, async () => { started(); await gate; return new Response(archive); });
+  const installing = h.core.applyFolderRelease(release); await fetching; const transactions = h.idb.transactions.length;
+  try {
+    const state = await Promise.race([requestAccess(prepared, h.env), new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('permission restoration must not wait for the held updater lock')), 2000);
+    })]);
+    assert.equal(state.state, 'deferred'); assert.equal(state.error, 'BUSY'); assert.equal(state.recoveryPending, true);
+    assert.equal(state.connected, true); assert.equal(state.autoInstall, true); assert.equal(state.permission, 'unavailable');
+    assert.equal(h.idb.transactions.length, transactions); assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), undefined);
+    noFolderWrites(h.env); assert.equal(h.env.permissionRequests, 1);
+  } finally { clearTimeout(timer); resume(); await installing; }
+});
+
+test('a failed lock after permission reports uncertainty without changing a stored connection or recovery journal', async () => {
+  const h = await interrupted({ automatic: true }), saved = h.idb.get('state'), journal = h.idb.get('journal');
+  const prepared = await h.core.prepareFolderPermissionRequest(); h.env.requestedPermission = 'granted'; h.env.events.length = 0; h.requests.length = 0;
+  h.locks.request = () => { throw namedError('InvalidStateError'); };
+  const state = await requestAccess(prepared, h.env); assert.equal(state.state, 'deferred'); assert.equal(state.error, 'BUSY'); assert.equal(state.recoveryPending, true);
+  assert.equal(state.autoInstall, true); assert.equal(h.idb.get('state'), saved); assert.equal(h.idb.get('journal'), journal);
+  assert.deepEqual(h.env.events, [['permission-request']]); noFolderWrites(h.env); assert.equal(h.requests.length, 0);
 });
 
 test('only exact newer official stable/BETA identities and signature URLs may be fetched', async () => {
@@ -755,8 +1088,8 @@ test('lease failures and stalled acquisition never write, and a late acquired le
   }
 });
 
-async function interrupted() {
-  const h = harness(); await h.connect(); const candidate = fixtureFiles('2.3.1', true); candidate.set('shared/helper.js', bytes('export const changed = "new";'));
+async function interrupted(options = {}) {
+  const h = harness(); await h.connect(options); const candidate = fixtureFiles('2.3.1', true); candidate.set('shared/helper.js', bytes('export const changed = "new";'));
   h.env.afterClose = (path) => { if (path === 'shared/helper.js') { h.env.afterClose = null; h.env.permission = 'prompt'; } };
   await h.core.applyFolderRelease(await h.prepare(candidate)); assert.ok(h.idb.get('journal')); h.env.requireJournal = false;
   return h;

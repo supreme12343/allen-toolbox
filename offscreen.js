@@ -47,7 +47,7 @@ async function handle(msg) {
     case 'updater-capabilities': return { manifest: typeof chrome.runtime.getManifest, url: typeof chrome.runtime.getURL,
       crypto: typeof crypto.subtle, uuid: typeof crypto.randomUUID, database: typeof indexedDB.open, locks: typeof navigator.locks?.request, secure: isSecureContext };
     case 'folder-state': return getFolderCore(msg).getFolderUpdateState();
-    case 'folder-install': return getFolderCore(msg).applyFolderRelease(msg.release);
+    case 'folder-install': return getFolderCore(msg).applyFolderRelease(msg.release, { automatic: msg.automatic === true });
     case 'folder-recover': return getFolderCore(msg).recoverFolder();
     case 'folder-forget': return getFolderCore(msg).forgetFolder();
     case 'pdf-chunk': return pdfChunk(msg);

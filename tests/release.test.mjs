@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { buildRelease, WINDOWS_UPDATER_ASSETS } from '../tools/release.mjs';
 import { EXTENSION_ASSETS } from '../shared/package.js';
+import { parseUpdatePackage } from '../shared/update-package.js';
 import { OFFICIAL_REPOSITORY } from '../shared/updates.js';
 
 const decode = (data) => new TextDecoder().decode(data);
@@ -81,6 +82,14 @@ test('real source assets rebuild to the same release bytes and checksum', async 
   const first = await buildRelease(), second = await buildRelease();
   assert.equal(first.checksum, second.checksum);
   assert.deepEqual(new Uint8Array(await first.blob.arrayBuffer()), new Uint8Array(await second.blob.arrayBuffer()));
+});
+
+test('the Solus updater can discover all newly packaged media files and their license', async () => {
+  const release = await buildRelease();
+  const added = ['lib/mediabunny-LICENSE.txt', 'lib/mediabunny.min.mjs', 'shared/media-mux.js', 'shared/media-pair.js'];
+  const assets = EXTENSION_ASSETS.filter((path) => !added.includes(path));
+  const parsed = await parseUpdatePackage(new Uint8Array(await release.blob.arrayBuffer()), { version: release.version, prerelease: release.prerelease, assets });
+  assert.ok(added.every((path) => parsed.paths.has(path)));
 });
 
 test('manifest homepages cannot redirect the fixed release update source', async () => {

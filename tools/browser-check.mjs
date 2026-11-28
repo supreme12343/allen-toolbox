@@ -25,8 +25,11 @@ const fixtureRelease = { tag_name: 'v' + fixtureVersion, html_url: fixtureReposi
 const output = await mkdtemp(join(options['--temp'] || join(tmpdir(), 'kilo'), 'allen-toolbox-verify-'));
 const downloads = join(output, 'downloads'); await mkdir(downloads);
 const host = 'toolbox-fixture.allenoverseas.com', origin = 'http://' + host;
+const pairedHost = 'https://toolbox-fixture.googlevideo.com';
+const pairVideo = pairedHost + '/videoplayback?id=fixture&itag=247', pairAudio = pairedHost + '/videoplayback?id=fixture&itag=251';
 const requests = [];
 let video = Buffer.alloc(0), failPdf = false, failVideoOnce = false, partialVideo = false, wrongVideoStartOnce = false, noValidatorVideo = false;
+let pairVideoData, pairAudioData;
 const hlsMedia = Buffer.alloc(376); hlsMedia[0] = hlsMedia[188] = 0x47;
 
 function makePdf() {
@@ -94,6 +97,10 @@ const server = createServer(async (request, response) => {
     response.end(data.subarray(start, end + 1)); return;
   }
   if (request.url === '/favicon.ico') { response.writeHead(204); response.end(); return; }
+  if (request.url === '/pair-video' || request.url === '/pair-audio') {
+    const [data, type] = request.url === '/pair-video' ? [pairVideoData, 'video/webm'] : [pairAudioData, 'audio/webm'];
+    response.writeHead(200, { 'Content-Type': type, 'Content-Length': data.length }); response.end(data); return;
+  }
   response.writeHead(404); response.end('Local fixture not found');
 });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -107,6 +114,7 @@ async function fixtureExtension() {
     if (path === 'manifest.json') {
       const manifest = JSON.parse(data.toString('utf8'));
       manifest.homepage_url = 'https://github.com/other/toolbox';
+      manifest.host_permissions.push(pairedHost + '/*');
       data = Buffer.from(JSON.stringify(manifest));
     }
     if (path === 'background.js') {
@@ -116,7 +124,19 @@ async function fixtureExtension() {
 chrome.runtime.sendNativeMessage = () => { globalThis.fixtureNativeCalls++; return Promise.reject(new Error('Native execution is prohibited in this browser fixture')); };
 const fixtureFetch = globalThis.fetch;
 globalThis.fetch = (input, options) => String(input) === ${JSON.stringify(api)} ? Promise.resolve(new Response(${JSON.stringify(JSON.stringify(fixtureBeta ? [fixtureRelease] : fixtureRelease))}, { headers: { 'content-type': 'application/json' } })) : fixtureFetch(input, options);
-` + data.toString('utf8') + '\nglobalThis.fixtureUpdateDebug = async () => ({ ...(await updates.status()), capabilities: await offscreen("updater-capabilities") });\n');
+` + data.toString('utf8') + `
+globalThis.fixtureUpdateDebug = async () => ({ ...(await updates.status()), capabilities: await offscreen('updater-capabilities') });
+globalThis.fixturePair = (tabId) => addItems(tabId, 0, '', [
+  { kind: 'media', url: ${JSON.stringify(pairVideo)}, ct: 'video/webm' },
+  { kind: 'media', url: ${JSON.stringify(pairAudio)}, ct: 'audio/webm' },
+], '', { ...tabState(tabId).frames[0], pageHref: 'https://www.youtube.com/watch?v=fixture' });
+`);
+    }
+    if (path === 'offscreen.js') {
+      data = Buffer.from(`const fixtureFetch = globalThis.fetch;
+globalThis.fetch = (url, options) => fixtureFetch(url === ${JSON.stringify(pairVideo)} ? ${JSON.stringify(origin + '/pair-video')} :
+  url === ${JSON.stringify(pairAudio)} ? ${JSON.stringify(origin + '/pair-audio')} : url, options);
+` + data.toString('utf8'));
     }
     await mkdir(dirname(target), { recursive: true }); await writeFile(target, data);
   }
@@ -138,6 +158,7 @@ async function launch(extensionDirectory, profile) {
     executablePath: options['--browser'], headless: true, acceptDownloads: true, downloadsPath: downloads,
     ignoreDefaultArgs: viaCDP ? ['--disable-extensions'] : [],
     args: [...(viaCDP ? ['--enable-unsafe-extension-debugging'] : ['--disable-extensions-except=' + extensionDirectory, '--load-extension=' + extensionDirectory]), '--no-proxy-server',
+      '--force-device-scale-factor=1', '--window-size=1280,900',
       '--host-resolver-rules=MAP ' + host + ' 127.0.0.1:' + server.address().port],
   });
   if (viaCDP) {
@@ -444,6 +465,66 @@ try {
     assert.equal(download.state, 'complete'); assert.deepEqual(await readFile(download.filename), hlsMedia);
   }
 
+  pairVideoData = Buffer.from(await popup.evaluate(async () => {
+    // Encode explicit frames: hidden canvases recorded via captureStream may produce an empty file.
+    const { Output, BufferTarget, WebMOutputFormat, CanvasSource } = await import(chrome.runtime.getURL('lib/mediabunny.min.mjs'));
+    const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
+    const drawing = canvas.getContext('2d'), frames = new CanvasSource(canvas, { codec: 'vp8', bitrate: 300000 });
+    const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
+    output.addVideoTrack(frames); await output.start();
+    for (let i = 0; i < 6; i++) {
+      drawing.fillStyle = i % 2 ? '#55d6b0' : '#15212b'; drawing.fillRect(0, 0, canvas.width, canvas.height);
+      await frames.add(i * .08, .08);
+    }
+    frames.close(); await output.finalize();
+    return Array.from(new Uint8Array(output.target.buffer));
+  }));
+  pairAudioData = Buffer.from(await popup.evaluate(async () => {
+    const audio = new AudioContext(), oscillator = audio.createOscillator(), destination = audio.createMediaStreamDestination();
+    oscillator.connect(destination); oscillator.start();
+    try {
+      await audio.resume();
+      const recorder = new MediaRecorder(destination.stream, { mimeType: 'audio/webm;codecs=opus' });
+      return await new Promise((resolve, reject) => {
+        const chunks = [];
+        recorder.ondataavailable = ({ data }) => { if (data.size) chunks.push(data); };
+        recorder.onerror = reject;
+        recorder.onstop = async () => resolve(Array.from(new Uint8Array(await new Blob(chunks).arrayBuffer())));
+        recorder.start(); setTimeout(() => recorder.stop(), 480);
+      });
+    } finally { oscillator.stop(); await audio.close(); }
+  }));
+  await worker.evaluate((tabId) => globalThis.fixturePair(tabId), tabId);
+  const withAudio = popup.getByRole('button', { name: 'Download with audio', exact: true });
+  await withAudio.waitFor();
+  assert.ok(await popup.getByRole('button', { name: 'Video only', exact: true }).isVisible());
+  finished = waitForDownload();
+  await withAudio.click();
+  download = await finished;
+  assert.equal(download.state, 'complete'); assert.match(download.filename, /\.webm$/i);
+  const paired = await readFile(download.filename);
+  const { Input, BufferSource, WEBM } = await import('../lib/mediabunny.min.mjs');
+  const joined = new Input({ source: new BufferSource(paired), formats: [WEBM] });
+  assert.deepEqual((await joined.getTracks()).map((track) => track.type).sort(), ['audio', 'video']);
+  joined.dispose();
+  await popup.evaluate(async (bytes) => {
+    const player = document.createElement('video'), url = URL.createObjectURL(new Blob([Uint8Array.from(bytes)], { type: 'video/webm' }));
+    player.muted = true; player.src = url;
+    try {
+      await player.play();
+      if (!Number.isFinite(player.duration) || !player.videoWidth) throw new Error('Combined media did not play in Chrome');
+      await new Promise((resolve, reject) => {
+        player.addEventListener('seeked', resolve, { once: true });
+        player.addEventListener('error', reject, { once: true });
+        player.currentTime = player.duration / 2;
+      });
+    } finally { player.pause(); URL.revokeObjectURL(url); }
+  }, [...paired]);
+  await popup.waitForFunction(async () => {
+    const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('toolbox-combined-downloads');
+    return (await directory.keys().next()).done;
+  });
+
   await popup.getByRole('tab', { name: 'Scripts', exact: true }).click();
   await popup.locator('.us').first().waitFor();
   assert.equal(await popup.locator('#ai-assist').getAttribute('open'), null);
@@ -615,7 +696,7 @@ try {
   const rescanned = await recipient.evaluate(() => chrome.runtime.sendMessage({ type: 'us:bundle-export' }));
   assert.deepEqual(rescanned, imported, 'A folder rescan must not duplicate or replace the shipped scripts');
   assert.deepEqual(errors, []);
-  console.log('PASS: real MV3 startup and native toolbar-popup sizing, graphite/blue theme, animated tabs and reduced-motion support, PDF cached fallback after HTTP 403, retried/capped-range genuine WebM byte identity, zero-based recovery of wrong offsets and unvalidated default prefixes, capped HLS range and whole-segment byte identity, native download completion, GitHub update controls with local metadata, persistent validation feedback and saved-script preservation, independent page-fix switches, blur/scroll restoration, site pause, overlay undo, reading view, playback speed, file filters, desktop/mobile UI with visible Supreme credits, protected folder Delete controls and backend rejection, native userscript file upload, concurrent GM header isolation, credited ZIP export and fresh-recipient script import/execution with private values excluded.');
+  console.log('PASS: sampled MV3 UI, PDFs, direct files, HLS, paired video/audio save with playback and seeking, scratch-file cleanup, updates, userscripts and ZIP export.');
   console.log('Artifacts: ' + output);
 } catch (error) {
   console.error('Browser test artifacts: ' + output);

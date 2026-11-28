@@ -2,13 +2,13 @@
   <img src="icons/logo.svg" width="80" height="80" alt="ALLEN Toolbox logo">
 </p>
 
-# ALLEN Toolbox 2.4.0 Solus
+# ALLEN Toolbox 2.4.1 Solus Vestro
 
 Local study tools with signed, browser-only extension updates. Connect the original extension folder once; this browser profile remembers it for future updates. No store fee, Windows installer, EXE or PowerShell helper is needed.
 
-**2.4.0 Solus** | **Manifest V3** | **Desktop Chrome / Edge / Brave**
+**2.4.1 Solus Vestro** | **Manifest V3** | **Desktop Chrome / Edge / Brave**
 
-[Download Solus](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.4.0) | [Browse releases](https://github.com/supreme12343/allen-toolbox/releases) | [Source code](https://github.com/supreme12343/allen-toolbox)
+[Download Solus Vestro](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.4.1) | [Browse releases](https://github.com/supreme12343/allen-toolbox/releases) | [Source code](https://github.com/supreme12343/allen-toolbox)
 
 ## Built-In Updates
 
@@ -101,7 +101,7 @@ The table covers the stable extension and the shipped **ALLEN Overseas Blocker B
 
 ## Install
 
-1. Download the [official Solus release ZIP](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.4.0) and extract it to a permanent folder.
+1. Download the [official Solus Vestro release ZIP](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.4.1) and extract it to a permanent folder.
 2. Open `chrome://extensions` (**Edge:** `edge://extensions`; **Brave:** `brave://extensions`) and switch on **Developer mode**.
 3. Click **Load unpacked** and select the extracted **`allen-toolbox`** folder containing `manifest.json`.
 4. Pin **ALLEN Toolbox** from the browser's extensions menu, then open a document or recording and click its toolbar icon.
@@ -127,6 +127,7 @@ Open the toolbar icon. **Library** is for files, **Page fixes** is for page beha
 | Save or open a PDF | **Library** > optional filename > **Save** or **Open**; wait for completion or check browser downloads. |
 | Copy PDF text | **Library** > **Copy text**; scanned pages need an external OCR tool. |
 | Download a recording | Play it briefly, then **Library** > quality > **Download video** or **Audio only**; approve only the required servers. |
+| Save YouTube video with audio | Play the video, then choose **Download with audio** on its video card when matching tracks are detected. Use **Rescan** if needed. |
 | Save separate HLS tracks | If labeled **Video stream only**, download that and **Audio only** separately; they are not merged. |
 | Change page fixes | **Page fixes** > preset or switch; pause fixes for this site with the site switch. Reload for early-page changes. |
 | Enable fixes on another website | **Page fixes** > enable the site switch and grant that site's access. |
@@ -150,7 +151,7 @@ Change extension shortcuts at `chrome://extensions/shortcuts` or **Utilities > C
 
 ## Bundled Blocker Bundle v6.1
 
-The package includes [ALLEN Overseas Blocker Bundle v6.1](scripts/ALLEN%20Overseas%20%E2%80%94%20Blocker%20Bundle.user.js), indexed in [`scripts/scripts.json`](scripts/scripts.json). Its userscript version is **6.1**, separate from the extension's **2.4.0 Solus** version. The built-in manager runs it without a separate Tampermonkey installation or Windows helper.
+The package includes [ALLEN Overseas Blocker Bundle v6.1](scripts/ALLEN%20Overseas%20%E2%80%94%20Blocker%20Bundle.user.js), indexed in [`scripts/scripts.json`](scripts/scripts.json). Its userscript version is **6.1**, separate from the extension's **2.4.1 Solus Vestro** version. The built-in manager runs it without a separate Tampermonkey installation or Windows helper.
 
 * **Target:** `https://digitalclass.allenoverseas.com/*`, at document start in the page world and matching frames. It does not run on every ALLEN Overseas subdomain.
 * **Fresh-import default:** enabled. Existing imported code, local edits, enabled states and values are preserved by updates/rescans, so an older installation may still contain a different script version.
@@ -258,7 +259,7 @@ Earlier beta pages remain available under [all releases](https://github.com/supr
 ## What it will not do
 
 * **DRM-protected video** is unsupported and is not bypassed. Unsupported HLS protection, including SAMPLE-AES and non-identity key formats, is rejected; direct-file detection is not a universal DRM detector.
-* **Live/unfinished streams**, **MPEG-DASH downloads**, unsupported HLS discontinuities/changing initialization maps and muxed or unverified single-stream fMP4 audio extraction are refused. Identified audio-only/external fMP4 renditions are supported; separate tracks are not merged and video is not transcoded.
+* **Live/unfinished streams**, **MPEG-DASH manifest downloads**, unsupported HLS discontinuities/changing initialization maps and muxed or unverified single-stream fMP4 audio extraction are refused. Separate HLS tracks are not merged. **Download with audio** joins compatible direct YouTube files into one MP4 or WebM without re-encoding; original track downloads remain available.
 * Scanned PDFs can be saved, but text extraction does not perform OCR. Password protection and content access controls are not bypassed.
 * Browser-internal pages cannot use injected utilities. Screenshots require returning to the source tab and using the toolbar popup. Fullscreen may require the webpage's fullscreen button or F11.
 * Buffered media is limited to 1 GiB per file. Automatic PDF capture is limited to 100 MiB, preparation to 128 MiB, and the PDF cache to four files/256 MiB. Oversized or unsupported files produce an explicit error, not a promise of a successful save. Keep the browser open for running downloads.
@@ -375,7 +376,7 @@ updater/               verification key and legacy native sources (not installer
 scripts/               scripts.json and bundled .user.js files
 plugins/               PLUGIN_PROMPT.md and (optional) folder plugins
 icons/                 vector brand and generated PNG toolbar icons
-lib/                   pdf.js (Apache-2.0), CodeMirror (MIT)
+lib/                   pdf.js (Apache-2.0), CodeMirror (MIT), Mediabunny (MPL-2.0)
 tools/                 checks, icons, release packaging and resumable publication
 .github/workflows/     tested, versioned GitHub release publication
 tests/                 deterministic Node regression tests (source checkout)
@@ -393,6 +394,8 @@ Credits to **Supreme** for ALLEN Toolbox.
 
 pdf.js © Mozilla (Apache-2.0). The GM API follows the conventions established by Greasemonkey and documented by Violentmonkey (MIT) and Tampermonkey; no code was copied from them.
 
+Local media joining uses the unmodified Mediabunny 1.66.5 browser bundle under [MPL-2.0](lib/mediabunny-LICENSE.txt). Its [corresponding source](https://registry.npmjs.org/mediabunny/-/mediabunny-1.66.5.tgz) is in the upstream npm archive (`package/src/`).
+
 ## License
 
 Original project code is **Copyright (c) 2026 Shaan**, under the restricted source-available terms in [LICENSE](LICENSE). Personal use of official releases is permitted; reuse of protected original code to improve another system or build countermeasures requires Shaan's written permission. This is **not copyleft** or an open-source license.
@@ -401,6 +404,7 @@ Copyright cannot prohibit general inspiration, independently written implementat
 
 ## Changelog
 
+* **2.4.1 Solus Vestro**: add **Download with audio** for detected compatible YouTube tracks. Join them locally without re-encoding and keep separate downloads as a fallback. Extension permissions and the signed updater are unchanged.
 * **2.4.0 Solus**: promote the tested browser-only updater, remember folder access across reloads, restore permission using the saved handle, preserve automatic-install preferences, retry deferred installs safely, and document one-time setup and recovery. No native executable installer is included.
 * **2.3.2 BETA**: version-bump update-test release. Use the connected 2.3.1 BETA folder to exercise signed in-place installation and reload. Updater code, permissions, signing key and recovery bootstrap remain unchanged.
 * **2.3.1 BETA**: experimental built-in folder updater with explicit permission, signed package checks, local-edit protection, backups and standalone recovery. Separate beta branch/channel and prerelease publishing; stable 2.3.0 remains Latest. Automatic installation is opt-in, not enabled by download or Load unpacked alone.

@@ -40,6 +40,23 @@ Report the BETA version, browser version, steps, expected/actual result, and the
 
 **Stable remains Latest:** [v2.3.0](https://github.com/supreme12343/allen-toolbox/releases/tag/v2.3.0).
 `;
+  if (version === '2.4.1') return `## ALLEN Toolbox ${versionName}
+
+**New: Download with audio.** Toolbox can join compatible video and audio tracks from the same YouTube recording into one MP4 or WebM file. It joins the tracks locally without re-encoding. Video-only and separate audio downloads are still available. Live and protected streams are not supported.
+
+### Use It
+
+1. Play the video for a few seconds, then open **Library** and click **Rescan** if needed.
+2. Click **Download with audio** on the video card. The button appears only when both compatible tracks are detected.
+
+### Update
+
+Already on Solus? Open **Utilities > Built-in updater setup > Check for updates**. A connected folder can install the signed update without changing the folder or granting new extension permissions. If Chrome withdrew write access, use **Restore write access**.
+
+For a new installation, download \`ALLEN-Toolbox-${version}.zip\`, extract it, and use **Load unpacked** at \`chrome://extensions\`. Keep the same installation folder when replacing files manually to preserve the extension ID and saved data.
+
+The signed ZIP and SHA-256 checksum are attached below. The signing key, extension permissions, and recovery files are unchanged.
+`;
   if (version !== '2.3.0') return `## ALLEN Toolbox ${versionName}
 
 The browser-only updater moves out of beta, with remembered folder access and safer retry/recovery handling. No store account, Windows installer, EXE or PowerShell helper is needed.

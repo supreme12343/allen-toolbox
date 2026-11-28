@@ -287,6 +287,7 @@ function mediaCard(item) {
   const name = makeNameInput('File name');
   const actions = el('div', 'actions');
   const bDl = el('button', 'btn primary grow', 'Download'), bCopy = el('button', 'btn', 'Copy link');
+  const bCombined = el('button', 'btn primary grow', 'Download with audio'); bCombined.hidden = true;
   const bCancel = el('button', 'btn', 'Cancel'); bCancel.hidden = true;
   const bDiag = makeDiagButton();
   const bar = el('div', 'bar'), fill = el('i'); bar.append(fill); bar.hidden = true;
@@ -298,23 +299,30 @@ function mediaCard(item) {
     body.append(title, meta, actions, st);
     actions.append(bCopy);
   } else {
-    actions.append(bDl, bCopy, bCancel);
+    actions.append(bCombined, bDl, bCopy, bCancel);
     body.append(title, meta, labeledField(name, st), actions, bar, st, bDiag);
   }
   bCopy.onclick = async () => { try { await navigator.clipboard.writeText(item.url); st.className = 'status ok'; st.textContent = 'Link copied. Signed links can contain private access tokens.'; } catch (error) { st.className = 'status err'; st.textContent = error.message; } };
   bCancel.onclick = async () => { try { if (currentJob) await bg('job-cancel', { jobId: currentJob.id }); } catch (error) { st.className = 'status err'; st.textContent = error.message; } };
   let starting = false;
-  bDl.onclick = async () => {
+  const start = async (combined) => {
     if (starting) return;
-    starting = true; bDl.disabled = true; setDiag(bDiag, '');
+    const selected = item, pair = combined ? selected.audioPair : null;
+    if (combined && !pair) return;
+    starting = true; bDl.disabled = bCombined.disabled = true; setDiag(bDiag, '');
     st.className = 'status'; st.textContent = 'Starting…';
     try {
-      if (!(await ensureOrigins([item.url]))) throw new Error('Access to ' + hostOf(item.url) + ' was not granted');
-      await bg('job-start', { id: item.id, kind: 'http', mode: 'video', name: name.value.trim() || cleanTitle(state.title) || undefined });
+      if (!(await ensureOrigins(pair ? [selected.url, pair.origin] : [selected.url]))) {
+        throw new Error(pair ? 'Allow access to both media servers to download with audio.' : 'Access to ' + hostOf(selected.url) + ' was not granted');
+      }
+      await bg('job-start', { id: selected.id, kind: 'http', mode: pair ? 'combined' : 'video', ...(pair ? { audioId: pair.id } : {}),
+        name: name.value.trim() || cleanTitle(state.title) || undefined });
       await refresh();
     } catch (e) { st.className = 'status err'; st.textContent = e.message; setDiag(bDiag, e.diag); }
-    finally { starting = false; bDl.disabled = !!currentJob && ['running', 'saving'].includes(currentJob.state); }
+    finally { starting = false; bDl.disabled = bCombined.disabled = !!currentJob && ['running', 'saving'].includes(currentJob.state); }
   };
+  bDl.onclick = () => start(false);
+  bCombined.onclick = () => start(true);
   return {
     root,
     update(it) {
@@ -326,8 +334,12 @@ function mediaCard(item) {
       setDefaultName(name, cleanTitle(state.title) || f.replace(/\.[a-z0-9]+$/i, ''), true);
       if (isDash) return;
       currentJob = (it.jobs || [])[0] || null;
-      bDl.textContent = currentJob && ['error', 'cancelled'].includes(currentJob.state) ? 'Retry download' : 'Download';
-      renderJob(currentJob, { bar, fill, cancel: bCancel, st, diag: bDiag, busy: starting, lock: [bDl, name] });
+      const paired = !!it.audioPair, retry = currentJob && ['error', 'cancelled'].includes(currentJob.state);
+      bCombined.hidden = !paired;
+      bCombined.textContent = retry && currentJob.mode === 'combined' ? 'Retry with audio' : 'Download with audio';
+      bDl.classList.toggle('primary', !paired); bDl.classList.toggle('grow', !paired);
+      bDl.textContent = paired ? 'Video only' : retry ? 'Retry download' : 'Download';
+      renderJob(currentJob, { bar, fill, cancel: bCancel, st, diag: bDiag, busy: starting, lock: [bCombined, bDl, name] });
     },
   };
 }
@@ -854,6 +866,7 @@ async function refresh() {
 
 (async function init() {
   const p = new URLSearchParams(location.search);
+  $('#media-library-license').href = new URL('../lib/mediabunny-LICENSE.txt', import.meta.url).href;
   if (p.get('dashboard') === '1') { document.body.classList.add('dashboard'); $('#dashboard').hidden = true; }
   tabId = +p.get('tab') || null;
   if (!tabId) { const [t] = await chrome.tabs.query({ active: true, currentWindow: true }); tabId = t && t.id; }

@@ -9,6 +9,7 @@ import { safeBase } from './shared/names.js';
 import { isViewerStream, viewerStreamKey, pdfRouteHref, PdfError, PDF_REOPEN } from './shared/pdf.js';
 import { selectOutput } from './shared/hls.js';
 import { DownloadError } from './shared/download.js';
+import { matchingYoutubeTracks, youtubeAudioPairs, youtubeTrack } from './shared/media-pair.js';
 import { initUpdates } from './shared/updates.js';
 import { initBuiltinUpdater } from './shared/builtin-updater.js';
 import { initGM } from './gm/gm-bg.js';
@@ -315,9 +316,13 @@ chrome.webRequest.onHeadersReceived.addListener((d) => {
   ready.then(() => {
     const ctx = networkContext(d, record);
     if (!ctx) return;
-    if (!kind) return;
-    if (kind === 'media' && size && size < 200 * 1024) return;       // skip tiny segments/clips
-    addItems(d.tabId, d.frameId, ctx.pageHref || d.documentUrl || d.initiator || '', [{ kind, url: d.url, ct, size, capturedAt: record ? record.at : Math.floor(d.timeStamp || Date.now()), via: 'response' }], '', ctx);
+    const track = (!kind || kind === 'media') && (d.statusCode === 200 || d.statusCode === 206) ?
+      youtubeTrack({ ...ctx, kind: 'media', url: d.url, ct, tabId: d.tabId, frameId: d.frameId }) : null;
+    if (!kind && !track) return;
+    if (!track && kind === 'media' && size && size < 200 * 1024) return;       // skip tiny segments/clips
+    addItems(d.tabId, d.frameId, ctx.pageHref || d.documentUrl || d.initiator || '', [{ kind: kind || 'media', url: d.url,
+      ct: track ? track.role + '/' + track.container : ct,
+      size: range ? size : track?.length || size, capturedAt: record ? record.at : Math.floor(d.timeStamp || Date.now()), via: 'response' }], '', ctx);
   });
 }, { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other', 'main_frame', 'sub_frame', 'object'] }, ['responseHeaders']);
 
@@ -843,7 +848,12 @@ async function handle(msg, sender) {
     }
     case 'hls-info': return hlsInfo({ ...msg, tabId: downloadTabId });
     case 'hls-preview': return hlsPreview({ ...msg, tabId: downloadTabId });
-    case 'job-start': return jobStart({ ...msg, tabId: downloadTabId });
+    case 'job-start': {
+      if (msg.mode === 'combined' && (sender.id !== chrome.runtime.id || sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('popup/popup.html'))) {
+        throw new Error('Only the Toolbox download controls can combine detected tracks');
+      }
+      return jobStart({ ...msg, tabId: downloadTabId });
+    }
     case 'job-cancel': {
       const j = jobs.get(msg.jobId);
       if (sender.tab && !sender.url?.startsWith(chrome.runtime.getURL('')) && j && j.tabId !== downloadTabId) throw new Error('A page cannot cancel another tab\'s download');
@@ -1016,8 +1026,8 @@ async function jobStart(msg) {
   const kind = msg.kind || (it.kind === 'media' ? 'http' : 'hls');
   if (kind !== 'http' && kind !== 'hls') throw new Error('Unsupported download kind');
   if ((kind === 'http' && it.kind !== 'media') || (kind === 'hls' && it.kind !== 'hls')) throw new Error('Choose a current detected recording');
-  if (!['audio', 'video'].includes(msg.mode) || (kind === 'http' && msg.mode !== 'video')) throw new Error('Unsupported download mode');
-  let output = { url: it.url, mode: 'video', outputRole: /^audio\//i.test(it.ct) ? 'audio' : 'video', notice: '' }, option, preview;
+  if (!(kind === 'http' ? ['video', 'combined'] : ['audio', 'video']).includes(msg.mode)) throw new Error('Unsupported download mode');
+  let output = { url: it.url, mode: 'video', outputRole: /^audio\//i.test(it.ct) ? 'audio' : 'video', notice: '' }, option, preview, audio;
   if (kind === 'hls') {
     const info = await hlsInfo(msg);
     option = info.options.find((o) => o.id === msg.quality);
@@ -1031,7 +1041,19 @@ async function jobStart(msg) {
   } else {
     const url = new URL(it.url);
     if (!/^https?:$/.test(url.protocol)) throw new Error('This media link must be reopened as a current HTTP(S) recording');
-    if (!(await chrome.permissions.contains({ origins: [url.origin + '/*'] }))) throw new DownloadError('DOWNLOAD_PERMISSION', 'Allow host access to ' + url.hostname + ' before downloading.');
+    const origins = new Set([url.origin + '/*']);
+    if (msg.mode === 'combined') {
+      audio = findItem(msg.tabId, msg.audioId);
+      if (!matchingYoutubeTracks(it, audio)) throw new Error('The matching YouTube audio is no longer available. Play the video again and rescan.');
+      origins.add(new URL(audio.url).origin + '/*');
+      output = { ...output, mode: 'combined', outputRole: 'muxed' };
+    }
+    if (!(await chrome.permissions.contains({ origins: [...origins] }))) throw new DownloadError('DOWNLOAD_PERMISSION',
+      audio ? 'Allow access to both media servers before combining the tracks.' : 'Allow host access to ' + url.hostname + ' before downloading.');
+    if (audio && [it, audio].some((track) => {
+      const current = tabs.get(msg.tabId)?.items[track.id];
+      return current?.scope !== track.scope || current?.url !== track.url;
+    })) throw new Error('The recording changed. Play it again and rescan.');
   }
   if (updates.isApplying?.()) throw new Error('The Windows updater is applying an update. Retry after the extension reloads.');
   const job = {
@@ -1044,7 +1066,7 @@ async function jobStart(msg) {
   try {
     await persistDownloads();
     await offscreen('job-start', { jobId: job.id, kind, url: output.url, mode: output.mode, name: msg.name, option,
-      previewId: preview?.previewId, context: it, concurrency: config.concurrency });
+      previewId: preview?.previewId, context: it, ...(audio ? { audioContext: audio } : {}), concurrency: config.concurrency });
   } catch (err) {
     if (job.state === 'saving' || job.state === 'done') return { jobId: job.id, outputRole: job.outputRole, notice: job.notice };
     if (job.state === 'running') { job.state = 'error'; job.message = err.message; job.finishedAt = Date.now(); await persistJobs(); toCancelWorker(job.id); }
@@ -1182,8 +1204,9 @@ async function popupState(tabId) {
   const st = tabState(tabId);
   let tab = {};
   try { tab = await chrome.tabs.get(tabId); } catch (e) {}
-  const items = visibleItems(st).sort((a, b) => b.ts - a.ts).map((it) => ({
-    ...it, jobs: [...jobs.values()].filter((j) => j.tabId === tabId && j.itemId === it.id).slice(-1),
+  const visible = visibleItems(st), pairs = youtubeAudioPairs(visible);
+  const items = visible.sort((a, b) => b.ts - a.ts).map((it) => ({
+    ...it, ...(pairs.has(it.id) ? { audioPair: pairs.get(it.id) } : {}), jobs: [...jobs.values()].filter((j) => j.tabId === tabId && j.itemId === it.id).slice(-1),
   }));
   const allSites = await chrome.permissions.contains({ origins: ['<all_urls>'] }).catch(() => false);
   return { tabId, url: tab.url || '', title: st.title || tab.title || '', items, allSites, config, siteEnabled: siteFixesEnabled(config, tab.url), updates: await updates.status() };

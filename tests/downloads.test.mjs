@@ -6,6 +6,7 @@ import * as download from '../shared/download.js';
 import * as pdf from '../shared/pdf.js';
 import * as names from '../shared/names.js';
 import * as hls from '../shared/hls.js';
+import * as mediaPair from '../shared/media-pair.js';
 import * as features from '../shared/features.js';
 
 const root = new URL('../', import.meta.url);
@@ -88,7 +89,7 @@ async function backgroundHarness(options = {}) {
     scripting: { async getRegisteredContentScripts() { return []; }, async registerContentScripts() {}, async unregisterContentScripts() {} },
     commands: { onCommand: event() },
   };
-  const context = vm.createContext({ ...features, ...pdf, DownloadError: download.DownloadError, selectOutput: hls.selectOutput,
+  const context = vm.createContext({ ...features, ...pdf, ...mediaPair, DownloadError: download.DownloadError, selectOutput: hls.selectOutput,
     safeBase: names.safeBase, chrome, URL, setTimeout, clearTimeout, console: { warn() {}, error() {} },
     initGM: () => ({ onJobUpdate(m, j) { gmEvents.push({ m: plain(m), j: plain(j) }); }, clearTabMenus() {}, syncAll() {} }),
     isBetaManifest: () => false,
@@ -100,7 +101,7 @@ async function backgroundHarness(options = {}) {
   return state;
 }
 
-async function offscreenHarness(fetch) {
+async function offscreenHarness(fetch, muxTracks) {
   const source = (await readFile(new URL('offscreen.js', root), 'utf8')).replace(/^import .*;\r?$/gm, '');
   const messages = [], blobs = new Map(), revoked = [], listener = event();
   class ObjectURL extends URL {}
@@ -109,13 +110,13 @@ async function offscreenHarness(fetch) {
   const chrome = { runtime: { id: 'fixture', getURL: (p) => 'chrome-extension://fixture/' + p, onMessage: listener,
     async sendMessage(msg) { messages.push(plain(msg)); return msg.type === 'off:request-acquire' ? { requestId: msg.requestId } : { ok: true }; } } };
   const wrapped = Object.fromEntries(['withResponse', 'fetchBytes', 'fetchBuffer', 'fetchText', 'downloadFile'].map((name) => [name, (url, opts, consume) => download[name](url, { ...opts, fetch, retryDelay: 0 }, consume)]));
-  const context = vm.createContext({ ...download, ...wrapped, ...names, ...pdf, ...hls,
+  const context = vm.createContext({ ...download, ...wrapped, ...names, ...pdf, ...hls, ...mediaPair, muxTracks,
     createFolderUpdater: () => ({ async getFolderUpdateState() { return { kind: 'folder', connected: false }; } }),
     pdfjs: { GlobalWorkerOptions: {}, getDocument() { return { promise: Promise.resolve({ numPages: 1, async getMetadata() { return { info: { Title: 'Physics DPP' } }; },
       async getPage() { return { async getTextContent() { return { items: [] }; }, cleanup() {} }; }, async destroy() {} }) }; } },
     TsAudioDemuxer: class {}, chrome, self: { addEventListener() {} }, crypto: globalThis.crypto, URL: ObjectURL,
     Blob, Uint8Array, TextDecoder, AbortController, DOMException, setTimeout, clearTimeout, atob, console });
-  new vm.Script(source + '\n globalThis.api = { pdfs, releasedScopes, pdfPrepare, pdfChunk, handle, runHttp };', { filename: 'offscreen.js' }).runInContext(context);
+  new vm.Script(source + '\n globalThis.api = { pdfs, releasedScopes, pdfPrepare, pdfChunk, handle, runHttp, runCombinedHttp };', { filename: 'offscreen.js' }).runInContext(context);
   return { api: context.api, messages, blobs, revoked, listener };
 }
 
@@ -1051,6 +1052,70 @@ test('job-start ignores caller URLs and resolves only a selected cached quality 
   const direct = item(); bg.api.tabs.get(1).items[direct.id] = direct;
   await bg.api.jobStart({ tabId: 1, id: direct.id, kind: 'http', mode: 'video', url: 'https://unrelated.test/evil' });
   assert.equal(bg.messages.filter((m) => m.type === 'job-start').at(-1).url, direct.url);
+});
+
+function youtubeItems() {
+  const attrs = { tabId: 1, frameId: 0, documentId: 'fixture', scope: 'youtube-scope', pageHref: 'https://www.youtube.com/watch?v=fixture', kind: 'media' };
+  return [{ ...attrs, id: 'media:video', ct: 'video/mp4', url: 'https://video.googlevideo.com/videoplayback?id=fixture&itag=137&clen=5' },
+    { ...attrs, id: 'media:audio', ct: 'audio/mp4', url: 'https://audio.googlevideo.com/videoplayback?id=fixture&itag=140&clen=5' }];
+}
+
+test('capture keeps small adaptive YouTube audio but still ignores unrelated tiny clips', async () => {
+  const bg = await backgroundHarness(), [video, audio] = youtubeItems();
+  const headerEvent = (item, extra = {}) => ({ tabId: 1, frameId: 0, documentId: 'fixture', documentUrl: item.pageHref, url: item.url,
+    type: 'xmlhttprequest', statusCode: 200, responseHeaders: [{ name: 'Content-Type', value: item.ct }, { name: 'Content-Length', value: '5' }], ...extra });
+  bg.events.received.emit(headerEvent(video));
+  bg.events.received.emit(headerEvent(audio));
+  bg.events.received.emit(headerEvent({ ...audio, url: 'https://other.test/small.m4a' }));
+  await tick();
+  const captures = Object.values(bg.api.tabs.get(1).items);
+  assert.deepEqual([...captures].map((item) => item.url), [video.url, audio.url]);
+  assert.equal(mediaPair.youtubeAudioPairs(captures).get(captures[0].id).id, captures[1].id);
+});
+
+test('combined downloads must use same-recording captured IDs and have consent for both hosts', async () => {
+  let allowed = false, checked = [];
+  const bg = await backgroundHarness({ permission: ({ origins }) => { checked = origins; return allowed; } });
+  const [video, audio] = youtubeItems();
+  bg.api.tabs.set(1, { items: { [video.id]: video, [audio.id]: audio }, frames: {}, children: [], generation: 'gen' });
+  const msg = { type: 'job-start', tabId: 1, id: video.id, kind: 'http', mode: 'combined', audioId: audio.id, url: 'https://other.example/bogus.mp4' };
+  await assert.rejects(bg.api.handle(msg, { id: bg.chrome.runtime.id, url: video.pageHref, tab: { id: 1 } }), /Only the Toolbox/);
+  await assert.rejects(bg.api.jobStart(msg), /both media servers/);
+  assert.deepEqual(plain(checked), ['https://video.googlevideo.com/*', 'https://audio.googlevideo.com/*']);
+  allowed = true;
+  audio.url = audio.url.replace('id=fixture', 'id=different');
+  await assert.rejects(bg.api.jobStart(msg), /matching YouTube audio/);
+  assert.equal(bg.messages.some((m) => m.type === 'job-start'), false);
+  audio.url = audio.url.replace('id=different', 'id=fixture');
+  const result = await bg.api.handle(msg, { id: bg.chrome.runtime.id, url: bg.chrome.runtime.getURL('popup/popup.html?tab=1') });
+  assert.equal(result.outputRole, 'muxed');
+  const start = bg.messages.find((m) => m.type === 'job-start');
+  assert.equal(start.url, video.url); assert.equal(start.audioContext.url, audio.url); assert.equal(start.mode, 'combined');
+});
+
+test('one combined object URL uses both request scopes and cleans up only after revocation', async () => {
+  const [video, audio] = youtubeItems();
+  let removed = false;
+  const worker = await offscreenHarness(async (url) => response(bytes(url === video.url ? 'video' : 'audio'), { 'content-type': url === video.url ? video.ct : audio.ct }),
+    async (v, a) => {
+      assert.equal(await v.text(), 'video'); assert.equal(await a.text(), 'audio');
+      return { blob: new Blob(['joined']), extension: 'mp4', cleanup: async () => { removed = true; } };
+    });
+  const out = await worker.api.runCombinedHttp({ context: video, audioContext: audio, url: video.url, name: 'Lecture.mp4' }, { id: 'merged', abort: new AbortController(), state: 'running' });
+  assert.equal(out.filename, 'Lecture.mp4'); assert.equal(out.outputRole, 'muxed'); assert.equal(worker.blobs.size, 1);
+  assert.deepEqual(worker.messages.filter((m) => m.type === 'off:request-acquire').map((m) => [m.url, m.context.id]), [[video.url, video.id], [audio.url, audio.id]]);
+  assert.equal(removed, false);
+  await worker.api.handle({ type: 'revoke', blobUrl: out.blobUrl });
+  assert.equal(worker.blobs.size, 0); assert.equal(removed, true);
+});
+
+test('a successful HTTP response with only part of one YouTube track does not save a silent file', async () => {
+  const [video, audio] = youtubeItems();
+  const worker = await offscreenHarness(async (url) => response(bytes(url === video.url ? 'video' : 'bad'), { 'content-type': 'video/mp4' }),
+    () => assert.fail('A truncated track must not be muxed'));
+  await assert.rejects(worker.api.runCombinedHttp({ context: video, audioContext: audio, url: video.url }, { id: 'merged', abort: new AbortController(), state: 'running' }),
+    { code: 'DOWNLOAD_PARTIAL' });
+  assert.equal(worker.blobs.size, 0);
 });
 
 test('job-start refuses to fetch when its initial session persistence fails', async () => {

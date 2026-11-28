@@ -11,6 +11,8 @@ import { TsAudioDemuxer } from './shared/tsaudio.js';
 import { meaningful, fromContentDisposition, dispositionFilename, linesFrom, deriveName, safeBase, safeFilename } from './shared/names.js';
 import { PdfError, PDF_REOPEN, validatePdfResponse, validatePdfBytes, canUseCapturedPdf, allowsCapturedFallback, isViewerStream } from './shared/pdf.js';
 import { DownloadError, MAX_DOWNLOAD_BYTES, checkAbort, withResponse, readBody, fetchBytes, fetchBuffer, fetchText, downloadFile, entityOf, contentLength, waitRetry } from './shared/download.js';
+import { matchingYoutubeTracks } from './shared/media-pair.js';
+import { muxTracks } from './shared/media-mux.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.mjs');
 
@@ -26,6 +28,13 @@ async function toBackground(msg, confirm = false) {
 }
 // Surface anything unexpected in the background worker's console (offscreen pages have no easy-to-find console).
 const logUp = (text) => toBackground({ type: 'off:log', text: String(text).slice(0, 500) });
+const combinedFiles = new Map();
+async function releaseBlob(blobUrl) {
+  try { URL.revokeObjectURL(blobUrl); } catch (e) {}
+  const cleanup = combinedFiles.get(blobUrl);
+  combinedFiles.delete(blobUrl);
+  if (cleanup) await cleanup();
+}
 self.addEventListener('error', (e) => logUp('error: ' + e.message));
 self.addEventListener('unhandledrejection', (e) => logUp('unhandled rejection: ' + (e.reason && e.reason.message || e.reason)));
 
@@ -66,7 +75,7 @@ async function handle(msg) {
     case 'job-status': return { jobs: [...jobs.values()].map((j) => ({ id: j.id, state: j.state, result: j.state === 'ready' ? j.result : undefined })) };
     case 'job-ack': { const j = jobs.get(msg.jobId); if (j?.state === 'ready') { j.acknowledged = true; jobs.delete(j.id); } return { ok: true }; }
     case 'job-cancel': { const j = jobs.get(msg.jobId); if (j) { j.cancelled = true; j.abort.abort(); } return { ok: true }; }
-    case 'revoke': try { URL.revokeObjectURL(msg.blobUrl); } catch (e) {} return { ok: true };
+    case 'revoke': await releaseBlob(msg.blobUrl); return { ok: true };
     default: throw new Error('Unknown message: ' + msg.type);
   }
 }
@@ -409,14 +418,14 @@ function startJob(msg) {
   job.promise = (async () => {
     let result;
     try {
-      result = await (msg.kind === 'http' ? runHttp : runHls)(msg, job);
+      result = await (msg.kind === 'http' ? (msg.mode === 'combined' ? runCombinedHttp : runHttp) : runHls)(msg, job);
       checkAbort(job.abort.signal);
       job.state = 'ready'; job.result = result;
       const ack = await toBackground({ type: 'off:job', jobId: job.id, state: 'ready', ...result }, true);
       job.acknowledged ||= !!ack?.ok;
     } catch (err) {
       job.abort.abort(err);
-      if (result?.blobUrl) URL.revokeObjectURL(result.blobUrl);
+      if (result?.blobUrl) await releaseBlob(result.blobUrl);
       job.state = job.cancelled ? 'cancelled' : 'error';
       await toBackground({ type: 'off:job', jobId: job.id, state: job.state,
         message: job.cancelled ? 'Cancelled' : (err?.message || String(err)), diag: err?.diag }, true);
@@ -585,6 +594,42 @@ const CT_EXT = {
   'application/pdf': 'pdf',
 };
 
+async function runCombinedHttp(msg, job) {
+  const match = matchingYoutubeTracks(msg.context, msg.audioContext);
+  if (!match || msg.url !== msg.context.url) throw new DownloadError('DOWNLOAD_CONTEXT', 'Play and rescan the video to find matching audio.');
+  const { signal } = job.abort, started = Date.now();
+  const report = throttle((p) => { if (!signal.aborted && job.state === 'running') toBackground({ type: 'off:job', jobId: job.id, state: 'running', unit: 'bytes', ...p }); }, 300);
+  const tooLarge = () => new DownloadError('DOWNLOAD_TOO_LARGE', 'The video and audio together exceed the download limit. Save the tracks separately.');
+  if (match.video.length + match.audio.length > MAX_DOWNLOAD_BYTES) throw tooLarge();
+  let bytes = 0;
+  const parts = [];
+  for (const [role, item] of [['video', msg.context], ['audio', msg.audioContext]]) {
+    checkAbort(signal);
+    if (bytes >= MAX_DOWNLOAD_BYTES) throw tooLarge();
+    const phase = 'Downloading ' + role + ' track';
+    report({ phase, bytes, done: bytes, total: 0 });
+    const part = await downloadFile(item.url, { context: requestContext(item), signal, maxBytes: MAX_DOWNLOAD_BYTES - bytes,
+      concurrency: msg.concurrency, onProgress: (p) => {
+        const done = bytes + p.bytes, total = p.total && (role === 'audio' || match.audio.length) ? bytes + p.total + (role === 'video' ? match.audio.length : 0) : 0;
+        report({ phase, done, total, bytes: done, speed: done / Math.max(0.5, (Date.now() - started) / 1000) });
+      } }).catch((error) => { throw error.code === 'DOWNLOAD_TOO_LARGE' ? tooLarge() : error; });
+    if (match[role].length && part.blob.size !== match[role].length) {
+      throw new DownloadError('DOWNLOAD_PARTIAL', 'Only part of the ' + role + ' track was available. Play the video again and rescan. No combined file was saved.');
+    }
+    parts.push(part); bytes += part.blob.size;
+  }
+  report({ phase: 'Combining video and audio', bytes, done: bytes, total: 0 });
+  const { blob, extension, cleanup } = await muxTracks(parts[0].blob, parts[1].blob, { signal, preferWebm: match.video.container === 'webm' });
+  try {
+    checkAbort(signal);
+    const base = safeBase(msg.name, { strict: false }) || 'YouTube video';
+    const blobUrl = URL.createObjectURL(blob);
+    combinedFiles.set(blobUrl, cleanup);
+    return { blobUrl, filename: base + '.' + extension, size: blob.size, done: blob.size, total: blob.size, bytes: blob.size, unit: 'bytes',
+      outputRole: 'muxed', notice: parts.some((part) => part.verification === 'byte-continuity') ? 'One track was downloaded without a server validator; only range continuity was verified.' : '' };
+  } catch (error) { await cleanup(); throw error; }
+}
+
 async function runHttp(msg, job) {
   const { signal } = job.abort;
   const t0 = Date.now();
@@ -612,7 +657,7 @@ async function runHttp(msg, job) {
 }
 
 function throttle(fn, ms) {
-  let last = 0;
-  return (a) => { const n = Date.now(); if (n - last >= ms || a.phase !== 'Downloading') { last = n; fn(a); } };
+  let last = 0, phase;
+  return (a) => { const n = Date.now(); if (n - last >= ms || a.phase !== phase || !a.phase.startsWith('Downloading')) { last = n; phase = a.phase; fn(a); } };
 }
 import { createFolderUpdater } from './shared/folder-updater.js';

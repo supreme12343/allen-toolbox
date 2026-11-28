@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ALLEN Toolbox",
-  "version": "2.4.0",
-  "version_name": "2.4.0 Solus",
+  "version": "2.4.1",
+  "version_name": "2.4.1 Solus Vestro",
   "homepage_url": "https://github.com/supreme12343/allen-toolbox",
   "description": "Local study tools: page fixes, PDF/video downloads, utilities and portable userscripts. Credits to Supreme.",
   "minimum_chrome_version": "122",

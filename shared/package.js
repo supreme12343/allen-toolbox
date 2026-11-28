@@ -9,12 +9,14 @@ export const EXTENSION_ASSETS = Object.freeze([
   'shared/features.js', 'shared/hls.js', 'shared/names.js', 'shared/pdf.js', 'shared/tsaudio.js',
   'shared/usmeta.js', 'shared/utilities.js', 'shared/download.js', 'shared/updates.js', 'shared/update-meta.js', 'shared/native-updater.js', 'shared/native-updater-config.js', 'shared/zip.js', 'shared/package.js',
   'shared/folder-updater.js', 'shared/update-package.js', 'shared/builtin-updater.js', 'shared/update-public-key.json',
+  'shared/media-pair.js', 'shared/media-mux.js',
   'popup/theme.css', 'popup/popup.html', 'popup/popup.js', 'popup/popup.css', 'popup/editor.html', 'popup/editor.js', 'popup/editor.css',
   'popup/updater.html', 'popup/updater.css', 'popup/updater.js', 'popup/updater-recovery.html', 'popup/updater-recovery.js',
   'sandbox/check.html', 'sandbox/check.js',
   'icons/icon16.png', 'icons/icon32.png', 'icons/icon48.png', 'icons/icon128.png', 'icons/logo.svg',
   'lib/pdf.min.mjs', 'lib/pdf.worker.min.mjs', 'lib/pdfjs-LICENSE.txt',
   'lib/codemirror.js', 'lib/codemirror.css', 'lib/codemirror.LICENSE',
+  'lib/mediabunny.min.mjs', 'lib/mediabunny-LICENSE.txt',
   'plugins/plugins.json', 'plugins/PLUGIN_PROMPT.md', 'README.md', 'LICENSE',
 ]);
 
